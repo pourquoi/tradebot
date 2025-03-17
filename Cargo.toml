@@ -1,0 +1,21 @@
+[package]
+name = "alimax-bot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.96"
+chrono = "0.4.40"
+futures = "0.3.31"
+futures-util = { version = "0.3.31", features = ["sink"] }
+rand = "0.9.0"
+reqwest = { version = "0.12.12", features = ["json"] }
+rust_decimal = { version = "1.36.0", features = ["serde", "serde-with-str"] }
+rust_decimal_macros = "1.36.0"
+serde = { version = "1.0.218", features = ["serde_derive"] }
+serde_json = "1.0.139"
+tokio = { version = "1.43.0", features = ["full"] }
+tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+tungstenite = "0.26.2"
