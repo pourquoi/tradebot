@@ -83,67 +83,6 @@ pub struct KLineData {
     pub close_time: u64,
 }
 
-pub fn new_client() -> Client {
-    let client = Client::builder().build().unwrap();
-    client
-}
-
-pub async fn ping(client: &Client) -> Result<Response> {
-    let r = client.get(format!("{ENDPOINT}/api/v3/ping")).send().await?;
-    Ok(r)
-}
-
-pub async fn kline_stream(symbols: Vec<String>, tx: Sender<MultiStream<KLineStream>>) {
-    let params = symbols
-        .iter()
-        .map(|s| format!("{}@kline_5m", s))
-        .collect::<Vec<String>>()
-        .join("/");
-    let request = format!("wss://fstream.binance.com/stream?streams={}", params);
-    loop {
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let (mut ws_stream, response) = connect_async(request.clone())
-            .await
-            .expect("Failed to connect to websocket");
-        info!("Connected to stream");
-        for (header, _value) in response.headers() {
-            debug!("* {header}");
-        }
-
-        loop {
-            while let Some(message) = ws_stream.next().await {
-                match message {
-                    Ok(Message::Text(message)) => {
-                        match serde_json::de::from_slice::<MultiStream<KLineStream>>(
-                            message.as_ref(),
-                        ) {
-                            Ok(stream) => {
-                                let _ = tx.send(stream);
-                            }
-                            Err(err) => {
-                                error!("Stream error: {}", err);
-                            }
-                        }
-                    }
-                    Ok(Message::Ping(data)) => {
-                        debug!("Received ping: {:?}", data);
-                        ws_stream.send(Message::Pong(data)).await.unwrap();
-                    }
-                    Ok(Message::Close(frame)) => {
-                        error!("Stream closed: {:?}", frame);
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        error!("Stream error: {}", err);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct Candle {
@@ -205,18 +144,98 @@ impl TryFrom<Value> for Candle {
     }
 }
 
-#[allow(dead_code)]
-pub async fn candles(client: &Client, symbol: &str, interval: &str) -> Result<Vec<Candle>> {
-    let params = [("symbol", symbol), ("interval", interval)];
-    let url =
-        Url::parse_with_params(format!("{ENDPOINT}/api/v3/klines").as_str(), &params).unwrap();
-    println!("{}", url);
-    let r = client.get(url).send().await?;
-    let r = r.text().await.unwrap();
-    let r: Vec<Value> = serde_json::de::from_str(r.as_str()).unwrap();
-    Ok(r.into_iter()
-        .flat_map(|v| v.try_into())
-        .collect::<Vec<Candle>>())
+pub struct Binance {
+    client: Client,
+}
+
+impl Binance {
+    pub fn new() -> Self {
+        let client = Client::builder().build().unwrap();
+        Self { client }
+    }
+
+    #[allow(dead_code)]
+    pub async fn candles(&self, symbol: &str, interval: &str) -> Result<Vec<Candle>> {
+        let params = [("symbol", symbol), ("interval", interval)];
+        let url =
+            Url::parse_with_params(format!("{ENDPOINT}/api/v3/klines").as_str(), &params).unwrap();
+        println!("{}", url);
+        let r = self.client.get(url).send().await?;
+        let r = r.text().await.unwrap();
+        let r: Vec<Value> = serde_json::de::from_str(r.as_str()).unwrap();
+        Ok(r.into_iter()
+            .flat_map(|v| v.try_into())
+            .collect::<Vec<Candle>>())
+    }
+}
+
+impl crate::marketplace::MarketPlace for Binance {
+    async fn start(&self, tickers: Vec<String>, tx: Sender<crate::marketplace::MarketPlaceEvent>) {
+        let params = tickers
+            .iter()
+            //.map(|s| format!("{}@kline_1m", s))
+            .map(|s| format!("{}@markPrice@1s", s))
+            .collect::<Vec<String>>()
+            .join("/");
+        let request = format!("wss://fstream.binance.com/stream?streams={}", params);
+        loop {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let (mut ws_stream, response) = connect_async(request.clone())
+                .await
+                .expect("Failed to connect to websocket");
+            info!("Connected to websocket");
+            for (header, _value) in response.headers() {
+                debug!("* {header}");
+            }
+
+            loop {
+                while let Some(message) = ws_stream.next().await {
+                    match message {
+                        Ok(Message::Text(message)) => {
+                            match serde_json::de::from_slice::<MultiStream<MarkPriceStream>>(
+                                message.as_ref(),
+                            ) {
+                                Ok(stream) => {
+                                    let _ =
+                                        tx.send(crate::marketplace::MarketPlaceEvent::TickerPrice(
+                                            crate::marketplace::TickerPriceEvent {
+                                                ticker: stream.data.symbol,
+                                                price: stream.data.mark_price,
+                                            },
+                                        ));
+                                }
+                                Err(err) => {
+                                    error!("Stream error: {}", err);
+                                }
+                            }
+                        }
+                        Ok(Message::Ping(data)) => {
+                            debug!("Received ping: {:?}", data);
+                            ws_stream.send(Message::Pong(data)).await.unwrap();
+                        }
+                        Ok(Message::Close(frame)) => {
+                            error!("Stream closed: {:?}", frame);
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            error!("Stream error: {}", err);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn ping(&self) -> Result<()> {
+        let _ = self
+            .client
+            .get(format!("{ENDPOINT}/api/v3/ping"))
+            .send()
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

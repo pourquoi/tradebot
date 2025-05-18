@@ -99,59 +99,6 @@ pub fn tick(state: &mut State, tick: Tick) {
             .market_history
             .insert(tick.symbol.clone(), vec![tick.price]);
     }
-
-    //match lock.orders.get(&s.data.symbol) {
-    //    Some(buy_price)
-    //        if buy_price.lt(&(s.data.index_price
-    //            - dec!(10)
-    //            - buy_price.saturating_mul(dec!(0.001)))) =>
-    //    {
-    //        println!("\nselling {} at {}", s.data.symbol, s.data.index_price);
-    //        lock.bank = lock.bank.saturating_add(s.data.index_price);
-    //        lock.orders.remove(&s.data.symbol);
-    //        println!("{:?}", lock.bank);
-    //    }
-    //    None => {
-    //        let mut outdated = true;
-    //        if let Some(candles) = lock.prices.get(&s.data.symbol) {
-    //            if let Some(last) = candles.last() {
-    //                //println!(
-    //                //    "{} {}",
-    //                //    last.open_time,
-    //                //    (chrono::Utc::now() + Duration::minutes(1)).timestamp_millis()
-    //                //);
-    //                if last.open_time
-    //                    > (chrono::Utc::now() - Duration::minutes(10)).timestamp_millis()
-    //                {
-    //                    outdated = false;
-    //                }
-    //            }
-    //        }
-    //        if outdated {
-    //            println!("\ngetting candles for {}", s.data.symbol);
-    //            let candles = binance::candles(&client, s.data.symbol.as_str(), "5m")
-    //                .await
-    //                .unwrap();
-    //            lock.prices.insert(s.data.symbol.clone(), candles);
-    //        }
-    //        let candles = lock.prices.get(&s.data.symbol).unwrap();
-    //        let percentiles = candles_percentiles(candles);
-    //        if percentiles[&10] != dec!(0) && percentiles[&10] < s.data.index_price {
-    //            println!("\nbuying {} at {}", s.data.symbol, s.data.index_price);
-    //            lock.orders
-    //                .insert(s.data.symbol.clone(), s.data.index_price);
-    //            lock.bank = lock.bank.saturating_sub(s.data.index_price);
-    //            println!("{:?}", lock.bank);
-    //        } else {
-    //            print!(".");
-    //            io::stdout().flush().unwrap();
-    //        }
-    //    }
-    //    _ => {
-    //        print!("-");
-    //        io::stdout().flush().unwrap();
-    //    }
-    //}
 }
 
 fn decide_buy(bank: Decimal, market_history: &Vec<Decimal>, price: Decimal) -> Option<Order> {

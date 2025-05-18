@@ -1,9 +1,6 @@
 use std::{collections::HashMap, usize};
 
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-
-use crate::binance::Candle;
 
 pub fn dec_avg<T>(prices: T) -> Decimal
 where
@@ -19,29 +16,15 @@ where
     }
 }
 
-pub fn candles_avg(candles: &Vec<Candle>) -> Decimal {
-    let prices = candles
-        .iter()
-        .map(|c| (c.low_price + c.high_price) / dec!(2))
-        .collect::<Vec<Decimal>>();
-    let avg = dec_avg(prices);
-    avg
-}
-
-pub fn candles_percentiles(candles: &Vec<Candle>) -> HashMap<u8, Decimal> {
-    let mut candles = candles.clone();
-    candles.sort_by_cached_key(|candle| (candle.high_price + candle.low_price) / dec!(2));
+pub fn dec_percentiles(prices: &Vec<Decimal>) -> HashMap<u8, Decimal> {
+    let mut prices = prices.clone();
+    prices.sort_unstable();
     let mut percentiles: HashMap<u8, Decimal> = HashMap::new();
-    let len = candles.len() as f64;
+    let len = prices.len() as f64;
     for p in (10..=90).step_by(10) {
-        let n = (len * (p as f64 / 100_f64)).round() as usize;
-        let n = n.min(candles.len() - 1);
-        match candles.get(n) {
-            Some(candle) => {
-                percentiles.insert(p as u8, (candle.low_price + candle.high_price) / dec!(2))
-            }
-            None => percentiles.insert(p, dec!(0)),
-        };
+        let n = (len * (p as f64 / 100_f64)).round();
+        let n = n.min(len - 1.);
+        percentiles.insert(p as u8, prices[n as usize]);
     }
     percentiles
 }
@@ -49,15 +32,12 @@ pub fn candles_percentiles(candles: &Vec<Candle>) -> HashMap<u8, Decimal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn test_candles_percentiles() {
-        let candles = vec![Candle {
-            high_price: dec!(0),
-            low_price: dec!(0),
-            ..Default::default()
-        }];
-        let percentiles = candles_percentiles(&candles);
+        let prices = vec![dec!(0)];
+        let percentiles = dec_percentiles(&prices);
         assert_eq!(
             percentiles,
             HashMap::from([
@@ -73,29 +53,8 @@ mod tests {
             ])
         );
 
-        let candles = vec![
-            Candle {
-                high_price: dec!(1),
-                low_price: dec!(2),
-                ..Default::default()
-            },
-            Candle {
-                high_price: dec!(1),
-                low_price: dec!(2),
-                ..Default::default()
-            },
-            Candle {
-                high_price: dec!(1),
-                low_price: dec!(2),
-                ..Default::default()
-            },
-            Candle {
-                high_price: dec!(10),
-                low_price: dec!(10),
-                ..Default::default()
-            },
-        ];
-        let percentiles = candles_percentiles(&candles);
+        let prices = vec![dec!(0.5), dec!(0.5), dec!(0.5), dec!(10)];
+        let percentiles = dec_percentiles(&prices);
         assert_eq!(
             percentiles,
             HashMap::from([
