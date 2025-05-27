@@ -1,0 +1,2 @@
+- [x] check order price and quantity against LOT_SIZE AND MIN_NOTIONAL (https://developers.binance.com/docs/binance-spot-api-docs/filters)
+- [ ] strategy terminate method = stop long orders, wait for all orders to complete, and quit

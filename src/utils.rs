@@ -2,21 +2,26 @@ use std::{collections::HashMap, usize};
 
 use rust_decimal::Decimal;
 
-pub fn dec_avg<T>(prices: T) -> Decimal
-where
-    T: IntoIterator<Item = Decimal>,
-{
-    let iter = prices.into_iter();
-    let (sum, count) = iter.fold((Decimal::ZERO, 0), |(s, c), p| (s + p, c + 1));
-
-    if count == 0 {
-        Decimal::ZERO
+pub fn short_term_sma(prices: &[Decimal], period: usize) -> Option<Decimal> {
+    if prices.len() >= period {
+        Some(prices[prices.len() - period..].iter().sum::<Decimal>() / Decimal::from(period as u32))
     } else {
-        sum / Decimal::from(count)
+        None
     }
 }
 
-pub fn dec_percentiles(prices: &Vec<Decimal>) -> HashMap<u8, Decimal> {
+pub fn avg(prices: &[Decimal]) -> Option<Decimal> {
+    let iter = prices.iter();
+    let (sum, count) = iter.fold((Decimal::ZERO, 0), |(s, c), p| (s + p, c + 1));
+
+    if count == 0 {
+        None
+    } else {
+        Some(sum / Decimal::from(count))
+    }
+}
+
+pub fn percentiles(prices: &Vec<Decimal>) -> HashMap<u8, Decimal> {
     let mut prices = prices.clone();
     prices.sort_unstable();
     let mut percentiles: HashMap<u8, Decimal> = HashMap::new();
@@ -37,9 +42,9 @@ mod tests {
     #[test]
     fn test_candles_percentiles() {
         let prices = vec![dec!(0)];
-        let percentiles = dec_percentiles(&prices);
+        let p = percentiles(&prices);
         assert_eq!(
-            percentiles,
+            p,
             HashMap::from([
                 (10_u8, dec!(0)),
                 (20_u8, dec!(0)),
@@ -53,12 +58,12 @@ mod tests {
             ])
         );
 
-        let prices = vec![dec!(0.5), dec!(0.5), dec!(0.5), dec!(10)];
-        let percentiles = dec_percentiles(&prices);
+        let prices = vec![dec!(0.5), dec!(1.5), dec!(1.5), dec!(10)];
+        let p = percentiles(&prices);
         assert_eq!(
-            percentiles,
+            p,
             HashMap::from([
-                (10_u8, dec!(1.5)),
+                (10_u8, dec!(0.5)),
                 (20_u8, dec!(1.5)),
                 (30_u8, dec!(1.5)),
                 (40_u8, dec!(1.5)),

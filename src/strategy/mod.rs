@@ -1,7 +1,7 @@
-use crate::marketplace::TickerPriceEvent;
+use crate::marketplace::MarketPlaceEvent;
 
 pub mod scalping;
 
 pub trait Strategy {
-    fn on_ticker_price(&self, event: TickerPriceEvent);
+    async fn on_marketplace_event(&mut self, event: MarketPlaceEvent);
 }
