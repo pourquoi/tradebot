@@ -1,5 +1,5 @@
 use chrono::prelude::*;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use colored::Colorize;
 use futures::future;
 use marketplace::binance::Binance;
@@ -33,10 +33,20 @@ struct Args {
     replay_path: Option<PathBuf>,
     #[arg(long)]
     store_path: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    AccountInfo,
 }
 
 #[tokio::main]
 async fn main() {
+    dotenvy::dotenv().ok();
+
     // fmt tracing subscriber -> log to stdout
     tracing_subscriber::registry()
         .with(fmt::layer())
@@ -44,6 +54,19 @@ async fn main() {
         .init();
 
     let args = Args::parse();
+    let is_replay = args.replay_path.is_some();
+
+    let mut binance = Binance::new();
+    binance.ping().await.expect("Failed to ping binance");
+
+    match &args.command {
+        Some(Commands::AccountInfo) => {
+            let account_overview = binance.get_account_overview().await;
+            info!("{:?}", account_overview);
+            return;
+        }
+        _ => {}
+    }
 
     let tickers = vec![
         Ticker::new("BTC", "USDT"),
@@ -67,10 +90,7 @@ async fn main() {
         );
     }
 
-    let mut binance = Binance::new();
-    binance.ping().await.expect("Failed to ping binance");
-
-    let (tx, mut rx) = tokio::sync::broadcast::channel::<marketplace::MarketPlaceEvent>(64);
+    let (tx, mut rx) = tokio::sync::broadcast::channel::<marketplace::MarketPlaceEvent>(10000);
 
     // spawn strategy task
     let strategy_task = tokio::task::spawn({
@@ -104,10 +124,14 @@ async fn main() {
                 let reader = BufReader::new(file);
                 let mut lines = reader.lines();
 
+                let mut i = 0;
                 while let Ok(Some(line)) = lines.next_line().await {
                     if let Ok(event) = serde_json::de::from_str(&line) {
                         tx.send(event).unwrap();
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        i += 1;
+                        if i % 1000 == 0 {
+                            tokio::time::sleep(Duration::from_micros(10)).await;
+                        }
                     }
                 }
             } else {
@@ -173,11 +197,15 @@ async fn main() {
                     .filter(|order| order.order_status == OrderStatus::Draft)
                 {
                     // simulate sending request to markeplace
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if !is_replay {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
                     order.order_status = OrderStatus::Sent {
                         ts: Utc::now().timestamp_millis(),
                     };
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if !is_replay {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
                     order.order_status = OrderStatus::Active {
                         ts: Utc::now().timestamp_millis(),
                     }
@@ -195,6 +223,7 @@ async fn main() {
         async move {
             loop {
                 let event = rx.recv().await;
+                let mut processed = false;
                 if let Ok(event) = event {
                     match event {
                         MarketPlaceEvent::Trade(event) => {
@@ -236,7 +265,9 @@ async fn main() {
                                 let trade_amount = trade_amount.unwrap();
 
                                 // simulate a marketplace request
-                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                if !is_replay {
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                }
 
                                 let to_fullfill = order.amount - order.fullfilled;
                                 let traded_amount = if to_fullfill > trade_amount {
@@ -346,12 +377,24 @@ async fn main() {
                                     }
                                 }
                                 info!("{}", portfolio);
+                                processed = true;
                             }
                         }
                         _ => {}
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                if !is_replay {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                if processed {
+                    let state = state.lock().await;
+                    info!(
+                        "\n## Portfolio: {}\n## {} {}",
+                        state.portfolio,
+                        "Scalped".yellow(),
+                        state.get_total_scalped("USDT".to_string())
+                    );
+                }
             }
         }
     });
@@ -385,7 +428,12 @@ async fn main() {
             loop {
                 {
                     let state = state.lock().await;
-                    info!("overview {}", state.portfolio);
+                    info!(
+                        "\n## Portfolio: {}\n## {} {}",
+                        state.portfolio,
+                        "Scalped".yellow(),
+                        state.get_total_scalped("USDT".to_string())
+                    );
                 }
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }

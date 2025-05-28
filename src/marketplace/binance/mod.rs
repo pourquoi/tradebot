@@ -9,8 +9,9 @@ use tokio::sync::broadcast::Sender;
 use crate::order::Order;
 use crate::ticker::Ticker;
 
-mod candles;
-mod info;
+pub mod account;
+pub mod candles;
+pub mod info;
 mod stream;
 
 const ENDPOINT: &str = "https://api.binance.com";

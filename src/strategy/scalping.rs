@@ -32,7 +32,7 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
             state,
             tickers,
             history,
-            target_profit: dec!(5),
+            target_profit: dec!(2),
             quote_amount: dec!(300),
             marketplace,
         }
@@ -103,26 +103,28 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
         let last_order = state.get_last_executed_order(&event.ticker, None);
 
         match last_order {
-            Some(last_order) => match last_order.order_type {
+            Some(last_order) => match last_order.1.order_type {
                 OrderType::Buy => {
                     let order = Order {
                         order_type: OrderType::Sell,
                         order_status: OrderStatus::Draft,
                         ticker: event.ticker.clone(),
-                        amount: last_order.amount,
+                        amount: last_order.1.amount,
                         price: event.price,
                         marketplace_id: None,
                         fullfilled: dec!(0),
+                        parent_order: Some(last_order.0),
                     };
-                    let receive = last_order.amount * event.price * (dec!(1) - M::get_fees(&order));
-                    let take_profit = receive - last_order.amount * last_order.price;
+                    let receive =
+                        last_order.1.amount * event.price * (dec!(1) - M::get_fees(&order));
+                    let take_profit = receive - last_order.1.amount * last_order.1.price;
                     // sell if the profit reach the target profit
                     if take_profit >= self.target_profit {
                         return Some(order);
                     } else {
                         debug!(
                             "Profit too low to sell {} {} : missing {} {}.",
-                            last_order.amount,
+                            last_order.1.amount,
                             event.ticker.base,
                             self.target_profit - take_profit,
                             event.ticker.quote
@@ -149,6 +151,7 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
                                 price: event.price,
                                 marketplace_id: None,
                                 fullfilled: dec!(0),
+                                parent_order: Some(last_order.0),
                             };
                             match self.marketplace.adjust_order_price_and_amount(&mut order) {
                                 Ok(()) => Some(order),
@@ -159,7 +162,7 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
                     };
                     match (potential_order, last_buy, first_buy) {
                         (Some(potential_order), Some(last_buy), Some(first_buy)) => {
-                            if last_buy.price > event.price || first_buy.price > event.price {
+                            if last_buy.1.price > event.price || first_buy.1.price > event.price {
                                 // buy if price is going down
                                 if sma_20.map_or(true, |sma| sma > event.price) {
                                     return Some(potential_order);
@@ -169,8 +172,8 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
                             } else {
                                 debug!(
                                     "First ({}) and last ({}) buy order price higher than current price : skipping buy.",
-                                    first_buy.price,
-                                    last_buy.price
+                                    first_buy.1.price,
+                                    last_buy.1.price
                                 );
                             }
                         }
@@ -193,6 +196,7 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
                                 price: event.price,
                                 marketplace_id: None,
                                 fullfilled: dec!(0),
+                                parent_order: None,
                             };
                             match self.marketplace.adjust_order_price_and_amount(&mut order) {
                                 Ok(()) => {

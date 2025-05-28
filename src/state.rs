@@ -1,4 +1,7 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, usize};
+
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 use crate::{
     order::{Order, OrderStatus, OrderType},
@@ -46,15 +49,16 @@ impl State {
         &self,
         ticker: &Ticker,
         order_type: Option<OrderType>,
-    ) -> Option<&Order> {
+    ) -> Option<(usize, &Order)> {
         self.orders
             .iter()
-            .filter(|order| {
+            .enumerate()
+            .filter(|(_i, order)| {
                 order.ticker == *ticker
                     && order_type.is_none_or(|t| t == order.order_type)
                     && order.is_executed()
             })
-            .min_by(|a, b| match (&a.order_status, &b.order_status) {
+            .min_by(|a, b| match (&a.1.order_status, &b.1.order_status) {
                 (OrderStatus::Executed { ts: ts_a }, OrderStatus::Executed { ts: ts_b }) => {
                     ts_a.cmp(ts_b)
                 }
@@ -66,19 +70,35 @@ impl State {
         &self,
         ticker: &Ticker,
         order_type: Option<OrderType>,
-    ) -> Option<&Order> {
+    ) -> Option<(usize, &Order)> {
         self.orders
             .iter()
-            .filter(|order| {
+            .enumerate()
+            .filter(|(_i, order)| {
                 order.ticker == *ticker
                     && order_type.is_none_or(|t| t == order.order_type)
                     && order.is_executed()
             })
-            .max_by(|a, b| match (&a.order_status, &b.order_status) {
+            .max_by(|a, b| match (&a.1.order_status, &b.1.order_status) {
                 (OrderStatus::Executed { ts: ts_a }, OrderStatus::Executed { ts: ts_b }) => {
                     ts_a.cmp(ts_b)
                 }
                 _ => Ordering::Equal,
+            })
+    }
+
+    pub fn get_total_scalped(&self, quote_asset: String) -> Decimal {
+        self.orders
+            .iter()
+            .filter(|order| {
+                matches!(order.order_type, OrderType::Sell) && order.ticker.quote == quote_asset
+            })
+            .fold(dec!(0), |acc, order| {
+                if let Some(i) = order.parent_order {
+                    let buy_price = self.orders[i].price;
+                    return acc + (order.price - buy_price) * order.amount;
+                }
+                acc
             })
     }
 }

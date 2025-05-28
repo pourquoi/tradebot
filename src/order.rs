@@ -35,6 +35,7 @@ pub struct Order {
     pub amount: Decimal,
     pub price: Decimal,
     pub fullfilled: Decimal,
+    pub parent_order: Option<usize>,
 }
 
 impl Order {
