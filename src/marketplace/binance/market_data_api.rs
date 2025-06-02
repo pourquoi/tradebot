@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::marketplace::binance::{Binance, MARKET_ENDPOINT};
+use crate::marketplace::binance::{Binance, PUBLIC_MARKET_ENDPOINT};
 
 #[derive(Deserialize, Debug, Clone, Default)]
 #[allow(dead_code)]
@@ -110,10 +110,12 @@ impl Binance {
     #[allow(dead_code)]
     pub async fn get_candles(&self, symbol: &str, interval: &str) -> Result<Vec<Candle>> {
         let params = [("symbol", symbol), ("interval", interval)];
-        let url =
-            Url::parse_with_params(format!("{MARKET_ENDPOINT}/api/v3/klines").as_str(), &params)
-                .unwrap();
-        println!("{}", url);
+        let url = Url::parse_with_params(
+            format!("{PUBLIC_MARKET_ENDPOINT}/api/v3/klines").as_str(),
+            &params,
+        )
+        .unwrap();
+        println!("Getting candles {}", url);
         let r = self.client.get(url).send().await?;
         let r = r.text().await.unwrap();
         let r: Vec<Value> = serde_json::de::from_str(r.as_str()).unwrap();

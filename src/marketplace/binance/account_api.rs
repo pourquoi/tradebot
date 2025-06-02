@@ -13,19 +13,29 @@ use crate::marketplace::binance::Binance;
 
 use super::ENDPOINT;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountOverview {
-    uid: u64,
-    balances: Vec<AccountBalance>,
+    pub uid: u64,
+    pub balances: Vec<AccountBalance>,
+    pub commission_rates: AccountCommissions,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct AccountBalance {
-    asset: String,
+    pub asset: String,
     #[serde(with = "rust_decimal::serde::str")]
-    free: Decimal,
+    pub free: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
-    locked: Decimal,
+    pub locked: Decimal,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct AccountCommissions {
+    #[serde(with = "rust_decimal::serde::str")]
+    pub maker: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub taker: Decimal,
 }
 
 impl Binance {
@@ -59,6 +69,8 @@ impl Binance {
             .await?;
 
         let body = res.text().await?;
+
+        debug!("Account info : {}", body);
 
         let overview = serde_json::de::from_str(body.as_str())?;
 

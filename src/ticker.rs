@@ -36,6 +36,22 @@ impl TryFrom<&str> for Ticker {
     }
 }
 
+impl TryFrom<&String> for Ticker {
+    type Error = ();
+
+    fn try_from(value: &String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+impl TryFrom<String> for Ticker {
+    type Error = ();
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(&value)
+    }
+}
+
 impl Display for Ticker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}{}", self.base, self.quote)

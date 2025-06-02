@@ -1,32 +1,33 @@
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 use crate::ticker::Ticker;
 
-#[derive(Clone, Debug, PartialEq, Copy)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Copy)]
 pub enum OrderType {
     Buy,
     Sell,
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub enum OrderStatus {
     #[default]
     Draft,
     Sent {
-        ts: i64,
+        ts: u64,
     },
     Active {
-        ts: i64,
+        ts: u64,
     },
     Executed {
-        ts: i64,
+        ts: u64,
     },
     Cancelled {
-        ts: i64,
+        ts: u64,
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Order {
     pub marketplace_id: Option<String>,
     pub order_type: OrderType,
@@ -36,6 +37,14 @@ pub struct Order {
     pub price: Decimal,
     pub fullfilled: Decimal,
     pub parent_order: Option<usize>,
+    pub trades: Vec<OrderTrade>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OrderTrade {
+    pub trade_time: u64,
+    pub amount: Decimal,
+    pub price: Decimal,
 }
 
 impl Order {

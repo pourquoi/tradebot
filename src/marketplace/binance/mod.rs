@@ -1,26 +1,31 @@
+use std::sync::Arc;
+
+use account_api::AccountOverview;
 use anyhow::{Context, Result};
-use info::ExchangeInfo;
-use info::SymbolInfoFilter;
+use exchange_info_api::ExchangeInfo;
+use exchange_info_api::SymbolInfoFilter;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::sync::broadcast::Sender;
+use tokio::sync::RwLock;
 
 use crate::order::Order;
 use crate::ticker::Ticker;
 
-pub mod account;
-pub mod candles;
-pub mod info;
-mod stream;
-
 const ENDPOINT: &str = "https://api.binance.com";
-const MARKET_ENDPOINT: &str = "https://data-api.binance.vision";
+const PUBLIC_MARKET_ENDPOINT: &str = "https://data-api.binance.vision";
+
+pub mod account_api;
+pub mod exchange_info_api;
+pub mod market_data_api;
+pub mod market_data_stream;
 
 #[derive(Default, Debug, Clone)]
 pub struct Binance {
     client: Client,
-    exchange_info: Option<ExchangeInfo>,
+    exchange_info: Arc<RwLock<Option<ExchangeInfo>>>,
+    account_overview: Arc<RwLock<Option<AccountOverview>>>,
 }
 
 impl Binance {
@@ -34,21 +39,32 @@ impl Binance {
 }
 
 impl crate::marketplace::MarketPlace for Binance {
-    fn get_fees(order: &Order) -> Decimal {
-        dec!(0.001)
+    async fn get_fees(&self, order: &Order) -> Decimal {
+        let account = self.account_overview.read().await;
+        let account = account.as_ref();
+        match account {
+            Some(account) => account.commission_rates.taker,
+            None => dec!(0.001),
+        }
     }
 
     async fn init(&mut self, tickers: Vec<Ticker>) -> Result<()> {
-        let exchange_info = self.get_exchange_info(&tickers).await?;
-        self.exchange_info = Some(exchange_info);
+        let mut exchange_info = self.exchange_info.write().await;
+        *exchange_info = {
+            let res = self.get_exchange_info(&tickers).await?;
+            Some(res)
+        };
+        let mut account_overview = self.account_overview.write().await;
+        *account_overview = {
+            let res = self.get_account_overview().await?;
+            Some(res)
+        };
         Ok(())
     }
 
-    fn adjust_order_price_and_amount(&self, order: &mut Order) -> Result<()> {
-        let exchange_info = self
-            .exchange_info
-            .as_ref()
-            .context("No exchange info yet")?;
+    async fn adjust_order_price_and_amount(&self, order: &mut Order) -> Result<()> {
+        let exchange_info = self.exchange_info.read().await;
+        let exchange_info = exchange_info.as_ref().context("Empty exchange info")?;
 
         let info = exchange_info.symbols.iter().find(|info| {
             info.quote_asset == order.ticker.quote && info.base_asset == order.ticker.base
@@ -113,8 +129,6 @@ impl crate::marketplace::MarketPlace for Binance {
         tickers: Vec<Ticker>,
         tx: Sender<crate::marketplace::MarketPlaceEvent>,
     ) {
-        self.exchange_info = Some(self.get_exchange_info(&tickers).await.unwrap());
-
         self.listen_trade_stream(tickers, tx).await;
     }
 

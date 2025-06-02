@@ -1,2 +1,10 @@
 - [x] check order price and quantity against LOT_SIZE AND MIN_NOTIONAL (https://developers.binance.com/docs/binance-spot-api-docs/filters)
 - [ ] strategy terminate method = stop long orders, wait for all orders to complete, and quit
+- [ ] add stop loss to strategy
+- [x] compute and include ATR to strategy
+- [ ] timeout orders
+- [ ] add market order / limit order logic
+- [ ] scalping "sessions" / ticker : one entry logic per session
+- [ ] include daily resistance
+- [ ] ratataui
+- [ ] check fees (see screencap in tmp/)

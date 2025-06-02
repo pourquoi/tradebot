@@ -25,7 +25,7 @@ impl State {
 
     pub fn add_order(&mut self, order: Order) -> Result<Order, String> {
         if order.order_status != OrderStatus::Draft {
-            return Err(format!("can only add draft orders"));
+            return Err(format!("Order is not a draft"));
         }
 
         let enough_funds = match order.order_type {
@@ -37,7 +37,7 @@ impl State {
         };
 
         if !enough_funds {
-            return Err(format!("unsuficient funds for order {order:?}"));
+            return Err(format!("Not enough funds in portfolio"));
         }
 
         self.orders.push(order.clone());
