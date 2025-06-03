@@ -205,7 +205,7 @@ impl<M: MarketPlace> Strategy for BuyAndHoldStrategy<M> {
                             price: event.price,
                             marketplace_id: None,
                             fullfilled: dec!(0),
-                            parent_order: None,
+                            parent_order_price: None,
                             trades: Vec::new(),
                         };
                         match self

@@ -45,7 +45,7 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
             tickers,
             trade_event_history,
             candle_event_history,
-            target_profit: dec!(1),
+            target_profit: dec!(1.5),
             quote_amount: dec!(300),
             marketplace,
             buy_cooldown: Duration::from_secs(60),
@@ -173,6 +173,12 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
         let long_atr = self.get_atr(&event.ticker, 10).await?;
         let short_atr = self.get_atr(&event.ticker, 3).await?;
 
+        //let sma = self.get_sma(&event.ticker, 1).await?;
+        //let wsma = self.get_wsma(&event.ticker, 1).await?;
+        //
+        //let long_atr = self.get_atr(&event.ticker, 1).await?;
+        //let short_atr = self.get_atr(&event.ticker, 1).await?;
+
         let state = self.state.read().await;
 
         // if there is a pending order, wait for it to be processed
@@ -200,11 +206,11 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
                             order_type: OrderType::Sell,
                             order_status: OrderStatus::Draft,
                             ticker: event.ticker.clone(),
-                            amount: last_order.1.amount,
+                            amount: last_order.1.amount * dec!(0.999), // todo
                             price: event.price,
                             marketplace_id: None,
                             fullfilled: dec!(0),
-                            parent_order: Some(last_order.0),
+                            parent_order_price: Some(last_order.1.price),
                             trades: Vec::new(),
                         };
                         let fees = self.marketplace.get_fees(&order).await;
@@ -223,7 +229,7 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
                                 self.target_profit - take_profit,
                                 event.ticker.quote
                             );
-                            self.channel.send(StrategyEvent::DiscardedSell {
+                            let _ = self.channel.send(StrategyEvent::DiscardedSell {
                                 reason,
                                 order: last_order.1.clone(),
                             });
@@ -238,7 +244,7 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
                                 "SMA {} > WSMA {} or price {} > SMA : skipping sell.",
                                 sma, wsma, event.price
                             );
-                            self.channel.send(StrategyEvent::DiscardedSell {
+                            let _ = self.channel.send(StrategyEvent::DiscardedSell {
                                 reason,
                                 order: last_order.1.clone(),
                             });
@@ -248,9 +254,11 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
                         return Some(order);
                     }
                     (OrderType::Sell, OrderStatus::Executed { ts: executed_at }) => {
+                        let time_since_sell = event.trade_time - executed_at;
+
                         // too soon for reentry
                         if event.trade_time <= executed_at
-                            || event.trade_time - executed_at < self.buy_cooldown.as_millis() as u64
+                            || time_since_sell < self.buy_cooldown.as_millis() as u64
                         {
                             trace!("Too soon for re-entry");
                             return None;
@@ -275,7 +283,7 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
                                     price: event.price,
                                     marketplace_id: None,
                                     fullfilled: dec!(0),
-                                    parent_order: Some(last_order.0),
+                                    parent_order_price: Some(last_order.1.price),
                                     trades: Vec::new(),
                                 };
                                 match self
@@ -296,62 +304,66 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
                                 // reentry logic
                                 //
 
-                                if last_buy.1.price <= event.price
-                                    && first_buy.1.price <= event.price
-                                {
-                                    let reason = format!(
-                                        "First ({}) and last ({}) buy order price higher than current price : skipping buy.",
-                                        first_buy.1.price,
-                                        last_buy.1.price
-                                    );
-                                    self.channel.send(StrategyEvent::DiscardedSell {
-                                        reason,
-                                        order: last_order.1.clone(),
+                                //if last_buy.1.price <= event.price
+                                //    && first_buy.1.price <= event.price
+                                //{
+                                //    let reason = format!(
+                                //        "First ({}) and last ({}) buy order price higher than current price : skipping buy.",
+                                //        first_buy.1.price,
+                                //        last_buy.1.price
+                                //    );
+                                //    let _ = self.channel.send(StrategyEvent::DiscardedSell {
+                                //        reason,
+                                //        order: last_order.1.clone(),
+                                //    });
+                                //    return None;
+                                //}
+
+                                if sma < wsma {
+                                    let message = format!("SMA < WSMA : skipping buy.");
+                                    let _ = self.channel.send(StrategyEvent::Info {
+                                        message,
+                                        order: Some(last_order.1.clone()),
                                     });
                                     return None;
                                 }
 
-                                if sma < wsma {
-                                    let message = format!("SMA < WSMA : skipping buy.");
-                                    self.channel.send(StrategyEvent::Info {
-                                        message,
-                                        order: Some(last_order.1.clone()),
-                                    });
-                                    //return None;
-                                }
-
-                                if short_atr <= long_atr {
+                                if time_since_sell < Duration::from_secs(60 * 10).as_millis() as u64
+                                    && short_atr < long_atr
+                                {
                                     let message = format!(
                                         "Average true range lower than usual : skipping buy."
                                     );
-                                    self.channel.send(StrategyEvent::Info {
+                                    let _ = self.channel.send(StrategyEvent::Info {
                                         message,
                                         order: Some(last_order.1.clone()),
                                     });
-                                    //return None;
+                                    return None;
                                 }
 
                                 let pullback_pct =
                                     (last_order.1.price - event.price) / last_order.1.price;
 
-                                if pullback_pct < dec!(0.01) {
+                                if time_since_sell < Duration::from_secs(60 * 10).as_millis() as u64
+                                    && pullback_pct < dec!(0.01)
+                                {
                                     let message = format!(
                                         "No significant pullback since last sell : skipping buy."
                                     );
-                                    self.channel.send(StrategyEvent::Info {
+                                    let _ = self.channel.send(StrategyEvent::Info {
                                         message,
                                         order: Some(last_order.1.clone()),
                                     });
-                                    //return None;
+                                    return None;
                                 }
 
                                 if sma >= event.price {
                                     let message = format!("SMA > price : skipping buy.");
-                                    self.channel.send(StrategyEvent::Info {
+                                    let _ = self.channel.send(StrategyEvent::Info {
                                         message,
                                         order: Some(last_order.1.clone()),
                                     });
-                                    //return None;
+                                    return None;
                                 }
 
                                 return Some(potential_order);
@@ -372,30 +384,30 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
 
                         if sma >= event.price {
                             let message = format!("SMA > price : skipping entry.");
-                            self.channel.send(StrategyEvent::Info {
+                            let _ = self.channel.send(StrategyEvent::Info {
                                 message,
                                 order: None,
                             });
-                            //return None;
+                            return None;
                         }
 
-                        if short_atr <= long_atr {
+                        if short_atr < long_atr {
                             let message =
                                 format!("Average true range lower than usual : skipping entry.");
-                            self.channel.send(StrategyEvent::Info {
+                            let _ = self.channel.send(StrategyEvent::Info {
                                 message,
                                 order: None,
                             });
-                            //return None;
+                            return None;
                         }
 
                         if sma < wsma {
                             let message = format!("SMA < WSMA : skipping entry.");
-                            self.channel.send(StrategyEvent::Info {
+                            let _ = self.channel.send(StrategyEvent::Info {
                                 message,
                                 order: None,
                             });
-                            //return None;
+                            return None;
                         }
 
                         let mut order = Order {
@@ -406,7 +418,7 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
                             price: event.price,
                             marketplace_id: None,
                             fullfilled: dec!(0),
-                            parent_order: None,
+                            parent_order_price: None,
                             trades: Vec::new(),
                         };
 

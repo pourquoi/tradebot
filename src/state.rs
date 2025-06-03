@@ -1,18 +1,25 @@
-use std::{cmp::Ordering, usize};
+use std::{cmp::Ordering, collections::VecDeque, usize};
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     order::{Order, OrderStatus, OrderType},
-    portfolio::Portfolio,
+    portfolio::{self, Portfolio},
     ticker::Ticker,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct State {
     pub portfolio: Portfolio,
     pub orders: Vec<Order>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum StateEvent {
+    Portfolio(Portfolio),
+    Orders(Vec<Order>),
 }
 
 impl State {
@@ -94,9 +101,10 @@ impl State {
                 matches!(order.order_type, OrderType::Sell) && order.ticker.quote == quote_asset
             })
             .fold(dec!(0), |acc, order| {
-                if let Some(i) = order.parent_order {
-                    let buy_price = self.orders[i].price;
-                    return acc + (order.price - buy_price) * order.amount;
+                if let Some(parent_order_price) = order.parent_order_price {
+                    return acc
+                        + (order.price * order.amount * dec!(0.999)
+                            - parent_order_price * order.amount / dec!(0.999));
                 }
                 acc
             })

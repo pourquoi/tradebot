@@ -40,7 +40,7 @@ async fn main() {
         let mut stream;
         loop {
             let url = format!("ws://{}/ws", args.address);
-            info!("Connecting to stream {url}");
+            //info!("Connecting to stream {url}");
             if let Ok(res) = connect_async(url).await {
                 stream = res.0;
                 break;

@@ -20,7 +20,7 @@ use tokio::select;
 use tokio::sync::RwLock;
 use tracing::{error, info, trace};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-use trading_bot::portfolio::PortfolioEvent;
+use trading_bot::state::StateEvent;
 
 use trading_bot::*;
 
@@ -98,7 +98,7 @@ async fn main() {
         state.portfolio.assets.insert(
             String::from("USDT"),
             Asset {
-                amount: dec!(2000),
+                amount: dec!(5000),
                 symbol: String::from("USDT").to_uppercase(),
                 value: None,
             },
@@ -259,6 +259,7 @@ async fn main() {
     let pending_orders_task = tokio::task::spawn({
         let state = state.clone();
         let tx_marketplace = tx_marketplace.clone();
+        let tx_app = tx_app.clone();
         let mut rx = tx_marketplace.subscribe();
         async move {
             loop {
@@ -283,6 +284,8 @@ async fn main() {
                 let mut state = state.write().await;
                 let State { orders, .. } = &mut *state;
 
+                let mut processed = false;
+
                 for order in orders
                     .iter_mut()
                     .filter(|order| matches!(order.order_status, OrderStatus::Sent { .. }))
@@ -292,8 +295,14 @@ async fn main() {
                             order.order_status = OrderStatus::Active { ts: time + 500_u64 }
                         }
                     }
+                    processed = true;
                 }
 
+                if processed {
+                    let _ = tx_app.send(AppEvent::State(StateEvent::Orders(orders.clone())));
+                }
+
+                processed = false;
                 for order in orders
                     .iter_mut()
                     .filter(|order| order.order_status == OrderStatus::Draft)
@@ -303,6 +312,11 @@ async fn main() {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                     order.order_status = OrderStatus::Sent { ts: time };
+                    processed = true;
+                }
+
+                if processed {
+                    let _ = tx_app.send(AppEvent::State(StateEvent::Orders(orders.clone())));
                 }
             }
         }
@@ -426,9 +440,9 @@ async fn main() {
                                         // decrease portfolio base asset
                                         //
                                         // todo : check if fees apply
-                                        let removed_base_amount =
-                                            order_trade.amount * (dec!(1) - fees);
                                         //let removed_base_amount = order_trade.amount;
+                                        //    order_trade.amount * (dec!(1) - fees);
+                                        let removed_base_amount = order_trade.amount;
                                         portfolio.update_asset_amount(
                                             &order.ticker.base,
                                             -removed_base_amount,
@@ -473,9 +487,10 @@ async fn main() {
                         "Scalped".yellow(),
                         state.get_total_scalped("USDT".to_string())
                     );
-                    let _ = tx_app.send(AppEvent::Portfolio(PortfolioEvent::Status(
+                    let _ = tx_app.send(AppEvent::State(StateEvent::Portfolio(
                         state.portfolio.clone(),
                     )));
+                    let _ = tx_app.send(AppEvent::State(StateEvent::Orders(state.orders.clone())));
                 }
             }
         }
@@ -495,6 +510,7 @@ async fn main() {
                             if let Some(asset) = state.portfolio.assets.get_mut(&event.ticker.base)
                             {
                                 asset.value = Some(asset.amount * event.price);
+                                state.portfolio.update_value();
                             }
                         }
                         _ => {}

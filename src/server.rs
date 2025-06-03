@@ -7,22 +7,15 @@ use axum::{
     routing::any,
     Router,
 };
-use futures::lock::Mutex;
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use tokio::{
     select,
-    sync::{
-        broadcast::{Receiver, Sender},
-        RwLock,
-    },
+    sync::{broadcast::Sender, RwLock},
 };
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, trace};
 
-use crate::{
-    portfolio::{self, PortfolioEvent},
-    AppEvent,
-};
+use crate::{state::StateEvent, AppEvent};
 
 struct ServerState {
     app_tx: Sender<AppEvent>,
@@ -65,12 +58,19 @@ async fn handle_socket(socket: WebSocket, state: SharedServerState) {
     let mut app_rx = state.app_tx.subscribe();
     let (mut sender, mut receiver) = socket.split();
 
-    // send portfolio
+    // send portfolio and orders
     {
         let app_state = state.app_state.read().await;
-        let event = AppEvent::Portfolio(PortfolioEvent::Status(app_state.portfolio.clone()));
+
+        let event = AppEvent::State(StateEvent::Portfolio(app_state.portfolio.clone()));
         let msg = serde_json::ser::to_string(&event).unwrap();
-        sender
+        let _ = sender
+            .send(axum::extract::ws::Message::Text(msg.into()))
+            .await;
+
+        let event = AppEvent::State(StateEvent::Orders(app_state.orders.clone()));
+        let msg = serde_json::ser::to_string(&event).unwrap();
+        let _ = sender
             .send(axum::extract::ws::Message::Text(msg.into()))
             .await;
     }

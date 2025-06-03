@@ -9,6 +9,7 @@ use crate::{
     marketplace::{CandleEvent, MarketPlaceEvent, TradeEvent},
     order::{Order, OrderType},
     state::State,
+    ticker::Ticker,
 };
 
 pub mod buy_and_hold;
@@ -22,6 +23,7 @@ pub enum StrategyEvent {
         order: Option<Order>,
     },
     DiscardedEntry {
+        ticker: Ticker,
         reason: String,
     },
     DiscardedReentry {

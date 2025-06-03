@@ -18,11 +18,6 @@ pub struct Portfolio {
     pub value: Option<Decimal>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum PortfolioEvent {
-    Status(Portfolio),
-}
-
 impl Portfolio {
     pub fn new() -> Self {
         Self {
@@ -75,7 +70,7 @@ impl Portfolio {
         self.value = Some(
             self.assets
                 .iter()
-                .flat_map(|(_, asset)| asset.value.map(|value| value * asset.amount))
+                .flat_map(|(_, asset)| asset.value.map(|value| value))
                 .sum(),
         );
     }

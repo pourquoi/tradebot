@@ -8,3 +8,5 @@
 - [ ] include daily resistance
 - [ ] ratataui
 - [ ] check fees (see screencap in tmp/)
+- [ ] list of filter functions as arguments of strategy
+- [ ] volume weighted average price

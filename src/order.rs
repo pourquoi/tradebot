@@ -1,15 +1,16 @@
-use rust_decimal::Decimal;
+use chrono::{DateTime, Utc};
+use rust_decimal::{prelude::ToPrimitive, Decimal};
 use serde::{Deserialize, Serialize};
 
 use crate::ticker::Ticker;
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Copy)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Copy, strum_macros::Display)]
 pub enum OrderType {
     Buy,
     Sell,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default, strum_macros::Display)]
 pub enum OrderStatus {
     #[default]
     Draft,
@@ -36,7 +37,7 @@ pub struct Order {
     pub amount: Decimal,
     pub price: Decimal,
     pub fullfilled: Decimal,
-    pub parent_order: Option<usize>,
+    pub parent_order_price: Option<Decimal>,
     pub trades: Vec<OrderTrade>,
 }
 
@@ -57,5 +58,16 @@ impl Order {
 
     pub fn is_executed(&self) -> bool {
         matches!(self.order_status, OrderStatus::Executed { .. })
+    }
+
+    pub fn status_date(&self) -> Option<DateTime<Utc>> {
+        match self.order_status {
+            OrderStatus::Sent { ts }
+            | OrderStatus::Active { ts }
+            | OrderStatus::Executed { ts } => ts
+                .to_i64()
+                .and_then(|ts| DateTime::from_timestamp_millis(ts)),
+            _ => None,
+        }
     }
 }

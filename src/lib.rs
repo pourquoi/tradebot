@@ -1,6 +1,6 @@
 use marketplace::MarketPlaceEvent;
-use portfolio::PortfolioEvent;
 use serde::{Deserialize, Serialize};
+use state::StateEvent;
 use strategy::StrategyEvent;
 
 pub mod marketplace;
@@ -15,7 +15,7 @@ pub mod utils;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AppEvent {
-    Portfolio(PortfolioEvent),
+    State(StateEvent),
     Strategy(StrategyEvent),
     MarketPlace(MarketPlaceEvent),
 }
