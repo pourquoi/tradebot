@@ -1,14 +1,9 @@
 ```shell
 # run bot
-RUST_LOG=info cargo run --bin bot -- --address=127.0.0.1:5555 --store-path=./data/events.jsonl
+RUST_LOG=info cargo run -- start --server-address=127.0.0.1:5555 --replay-path=./data/events.jsonl --symbol BTCUSDT --symbol BNBUSDT
 ```
 
 ```shell
 # run tui
-RUST_LOG=info cargo run --bin tui -- --address=127.0.0.1:5555
-```
-
-```shell
-# trace events
-websocat ws://127.0.0.1:5555/ws
+RUST_LOG=info cargo run -- tui --server-address=127.0.0.1:5555
 ```
