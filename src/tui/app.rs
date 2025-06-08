@@ -1,19 +1,18 @@
 use anyhow::Result;
-use chrono::format;
+use chrono::DateTime;
 use crossterm::event::{Event, EventStream, KeyCode};
-use futures_util::stream::StreamExt as _;
 use futures_util::StreamExt;
 use ratatui::{
     layout::{
         Constraint::{self},
-        Layout, Rect,
+        Layout, Margin, Rect,
     },
     style::{palette::tailwind, Color, Style, Stylize},
     symbols,
     text::{Line, Span, Text},
     widgets::{
-        Axis, Block, Borders, Cell, Chart, Dataset, List, ListItem, Paragraph, Row, Sparkline,
-        Table, TableState, Widget, Wrap,
+        Axis, Block, Borders, Cell, Chart, Dataset, List, ListItem, Paragraph, Row, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Sparkline, Table, TableState, Widget, Wrap,
     },
     Frame,
 };
@@ -27,7 +26,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::{
     marketplace::{CandleEvent, MarketPlaceEvent, TradeEvent},
-    order::{Order, OrderType},
+    order::{Order, OrderSide},
     portfolio::{Asset, Portfolio},
     state::StateEvent,
     strategy::StrategyEvent,
@@ -36,7 +35,9 @@ use crate::{
 };
 
 enum Window {
+    None,
     Portfolio,
+    Orders,
 }
 
 pub struct App {
@@ -50,6 +51,8 @@ pub struct App {
     selected_window: Window,
     selected_asset: Option<String>,
     order_table_state: TableState,
+    orders_scroll_state: ScrollbarState,
+    orders_scroll: usize,
 }
 
 impl App {
@@ -64,7 +67,9 @@ impl App {
             orders: Vec::new(),
             selected_asset: None,
             selected_window: Window::Portfolio,
-            order_table_state: TableState::default(),
+            order_table_state: TableState::default().with_selected(0),
+            orders_scroll_state: ScrollbarState::new(0),
+            orders_scroll: 0,
         }
     }
 
@@ -96,24 +101,18 @@ impl App {
             }
             AppEvent::State(StateEvent::Orders(orders)) => {
                 self.orders = orders;
+                self.update_orders_scroll();
             }
-            AppEvent::Strategy(StrategyEvent::Info { message, order }) => {
-                if let Some(order) = order {
-                    self.last_strategy_events
-                        .insert(order.ticker.clone(), message);
+            AppEvent::Strategy(StrategyEvent::Action(action)) => match action {
+                crate::strategy::StrategyAction::Continue {
+                    ticker,
+                    stop_propagation,
+                    reason,
+                } => {
+                    self.last_strategy_events.insert(ticker, reason);
                 }
-            }
-            AppEvent::Strategy(StrategyEvent::DiscardedSell { reason, order }) => {
-                self.last_strategy_events
-                    .insert(order.ticker.clone(), reason);
-            }
-            AppEvent::Strategy(StrategyEvent::DiscardedReentry { reason, order }) => {
-                self.last_strategy_events
-                    .insert(order.ticker.clone(), reason);
-            }
-            AppEvent::Strategy(StrategyEvent::DiscardedEntry { reason, ticker }) => {
-                self.last_strategy_events.insert(ticker.clone(), reason);
-            }
+                _ => {}
+            },
             AppEvent::MarketPlace(MarketPlaceEvent::Candle(candle)) => {
                 let candles = self
                     .candles
@@ -146,13 +145,25 @@ impl App {
     fn handle_events(&mut self, event: Event) {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
-                KeyCode::Esc => self.should_quit = true,
+                KeyCode::Esc => match self.selected_window {
+                    Window::None => self.should_quit = true,
+                    _ => {
+                        self.selected_asset = None;
+                        self.selected_window = Window::None;
+                    }
+                },
                 KeyCode::Up => match self.selected_window {
                     Window::Portfolio => {
                         self.selected_asset = self
                             .portfolio
                             .next_prev_symbol(self.selected_asset.clone(), false);
                     }
+                    Window::Orders => {
+                        self.orders_scroll = self.orders_scroll.saturating_sub(1);
+                        self.orders_scroll_state =
+                            self.orders_scroll_state.position(self.orders_scroll);
+                    }
+                    _ => {}
                 },
                 KeyCode::Down => match self.selected_window {
                     Window::Portfolio => {
@@ -160,10 +171,44 @@ impl App {
                             .portfolio
                             .next_prev_symbol(self.selected_asset.clone(), true);
                     }
+                    Window::Orders => {
+                        self.orders_scroll = self.orders_scroll.saturating_add(1);
+                        self.orders_scroll_state =
+                            self.orders_scroll_state.position(self.orders_scroll);
+                    }
+                    _ => {}
                 },
+                KeyCode::Char('1') => {
+                    self.selected_window = Window::Portfolio;
+                    self.update_orders_scroll();
+                }
+                KeyCode::Char('2') => {
+                    self.selected_window = Window::Orders;
+                    self.update_orders_scroll();
+                }
                 _ => {}
             }
         }
+    }
+
+    fn update_orders_scroll(&mut self) {
+        let l = match self
+            .selected_asset
+            .as_ref()
+            .and_then(|s| self.portfolio.assets.get(s))
+        {
+            Some(asset) => self
+                .orders
+                .iter()
+                .filter(|order| order.ticker.base == asset.symbol)
+                .count(),
+            None => self.orders.len(),
+        };
+        self.orders_scroll_state = self.orders_scroll_state.content_length(l);
+        if self.orders_scroll >= l {
+            self.orders_scroll = 0;
+        }
+        self.order_table_state.select(Some(self.orders_scroll));
     }
 
     fn render(&mut self, frame: &mut Frame) {
@@ -199,7 +244,13 @@ impl App {
     }
 
     fn render_portfolio(&self, frame: &mut Frame, area: Rect) {
-        let block = Block::default().title("Portfolio").borders(Borders::ALL);
+        let block = Block::default()
+            .title("(1) Portfolio")
+            .borders(Borders::ALL)
+            .border_style(match self.selected_window {
+                Window::Portfolio => tailwind::BLUE.c500,
+                _ => Color::White,
+            });
         let mut assets: Vec<&String> = self.portfolio.assets.keys().collect();
         assets.sort();
 
@@ -222,22 +273,24 @@ impl App {
     }
 
     fn render_detail(&mut self, frame: &mut Frame, area: Rect) {
-        match self.selected_window {
-            Window::Portfolio => {
-                self.render_orders(frame, area);
-            }
-            _ => {}
-        }
+        self.render_orders(frame, area);
     }
 
     fn render_orders(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::default().title("Orders").borders(Borders::ALL);
+        let block = Block::default()
+            .title("(2) Orders")
+            .borders(Borders::ALL)
+            .border_style(match self.selected_window {
+                Window::Orders => tailwind::BLUE.c500,
+                _ => Color::White,
+            });
 
         let header_style = Style::default()
             .fg(tailwind::SLATE.c900)
             .bg(tailwind::SLATE.c200);
 
         let header = [
+            "#",
             "Date (UTC)",
             "Ticker",
             "Type",
@@ -265,29 +318,40 @@ impl App {
             .enumerate()
             .map(|(i, order)| {
                 Row::new([
-                    Cell::from(match order.status_date() {
-                        Some(date) => format!("{}", date),
-                        _ => "-".to_string(),
-                    }),
+                    Cell::from(format!("{}", i)),
+                    Cell::from(
+                        match order
+                            .working_time
+                            .and_then(|d| DateTime::from_timestamp_millis(d as i64))
+                        {
+                            Some(date) => format!("{}", date),
+                            _ => "-".to_string(),
+                        },
+                    ),
                     Cell::from(format!("{}", order.ticker.base)).style(tailwind::BLUE.c500),
-                    Cell::from(format!("{}", order.order_type)).style(Style::new().fg(
-                        match order.order_type {
-                            OrderType::Buy => tailwind::GREEN.c500,
-                            OrderType::Sell => tailwind::RED.c500,
+                    Cell::from(format!("{}", order.side)).style(Style::new().fg(
+                        match order.side {
+                            OrderSide::Buy => tailwind::GREEN.c500,
+                            OrderSide::Sell => tailwind::RED.c500,
                         },
                     )),
-                    Cell::from(format!("{}", order.order_status)),
+                    Cell::from(format!("{}", order.status)),
                     Cell::from(format!("{}", order.price * order.amount)),
                     Cell::from(format!(
                         "{}%",
-                        (dec!(100) * order.fullfilled / order.amount).round_dp(2)
+                        (dec!(100) * order.filled_amount / order.amount).round_dp(2)
                     )),
                     Cell::from(format!("{}", order.price)),
                     Cell::from(format!("{}", order.amount)),
                 ])
-                .style(match i % 2 {
-                    0 => Style::new().bg(tailwind::SLATE.c950),
-                    _ => Style::new().bg(tailwind::SLATE.c900),
+                .style(match self.selected_window {
+                    Window::Orders if i == self.orders_scroll => {
+                        Style::new().bg(tailwind::BLUE.c500)
+                    }
+                    _ => match i % 2 {
+                        0 => Style::new().bg(tailwind::SLATE.c950),
+                        _ => Style::new().bg(tailwind::SLATE.c900),
+                    },
                 })
             })
             .collect();
@@ -295,6 +359,7 @@ impl App {
         let t = Table::new(
             rows,
             [
+                Constraint::Min(3),
                 Constraint::Min(19),
                 Constraint::Min(6),
                 Constraint::Min(6),
@@ -309,6 +374,16 @@ impl App {
         .block(block);
 
         frame.render_stateful_widget(t, area, &mut self.order_table_state);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            }),
+            &mut self.orders_scroll_state,
+        );
     }
 
     fn render_trades(&self, frame: &mut Frame, area: Rect) {
@@ -389,7 +464,7 @@ impl App {
                             //(i as f64, i as f64)
                             (
                                 candle.close_time as f64,
-                                candle.close_price.unwrap_or(dec!(0)).to_f64().unwrap(),
+                                candle.close_price.to_f64().unwrap(),
                             )
                         })
                         .collect();
@@ -479,10 +554,17 @@ impl App {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default().borders(Borders::ALL);
-        let keys = Paragraph::new(Text::from(
-            "(Esc) quit | (↑) previous asset | (↓) next asset",
-        ))
-        .block(block);
+        let keys = match self.selected_window {
+            Window::Portfolio => {
+                "(Esc) back | (1) Portfolio | (2) Orders | (↑) previous asset | (↓) next asset"
+            }
+            Window::Orders => {
+                "(Esc) back | (1) Portfolio | (2) Orders | (↑) previous order | (↓) next order"
+            }
+            Window::None => "(Esc) quit | (1) Portfolio | (2) Orders",
+        };
+
+        let keys = Paragraph::new(Text::from(keys)).block(block);
         frame.render_widget(keys, area);
     }
 }

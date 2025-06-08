@@ -1,4 +1,14 @@
-use anyhow::Result;
+use crate::marketplace::{
+    CandleEvent, MarketPlace, MarketPlaceData, MarketPlaceEvent, MarketPlaceSettings, TradeEvent,
+};
+use crate::order::{Order, OrderSide, OrderStatus, OrderType};
+use crate::portfolio::Portfolio;
+use crate::state::State;
+use crate::strategy::Strategy;
+use crate::ticker::Ticker;
+use crate::utils::{atr, sma, wsma};
+use anyhow::{anyhow, Result};
+use chrono::DateTime;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, VecDeque};
@@ -8,20 +18,11 @@ use std::usize;
 use tokio::sync::RwLock;
 use tracing::{debug, info, trace};
 
-use crate::marketplace::{CandleEvent, MarketPlace, TradeEvent};
-use crate::order::{Order, OrderStatus, OrderType};
-use crate::portfolio::Portfolio;
-use crate::state::State;
-use crate::strategy::Strategy;
-use crate::ticker::Ticker;
-use crate::utils::{atr, sma, wsma};
-
-use super::StrategyEvent;
+use super::StrategyAction;
 
 #[derive(Clone, Debug)]
 pub struct ScalpingStrategy<M> {
     marketplace: M,
-    channel: tokio::sync::broadcast::Sender<StrategyEvent>,
     tickers: Vec<Ticker>,
     state: Arc<RwLock<State>>,
     trade_event_history: Arc<RwLock<HashMap<Ticker, VecDeque<TradeEvent>>>>,
@@ -31,13 +32,8 @@ pub struct ScalpingStrategy<M> {
     buy_cooldown: Duration,
 }
 
-impl<M: MarketPlace> ScalpingStrategy<M> {
-    pub fn new(
-        state: Arc<RwLock<State>>,
-        marketplace: M,
-        tickers: Vec<Ticker>,
-        channel: tokio::sync::broadcast::Sender<StrategyEvent>,
-    ) -> Self {
+impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M> {
+    pub fn new(state: Arc<RwLock<State>>, marketplace: M, tickers: Vec<Ticker>) -> Self {
         let trade_event_history = Arc::from(RwLock::from(HashMap::new()));
         let candle_event_history = Arc::from(RwLock::from(HashMap::new()));
         Self {
@@ -45,22 +41,45 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
             tickers,
             trade_event_history,
             candle_event_history,
-            target_profit: dec!(1.5),
+            target_profit: dec!(1.),
             quote_amount: dec!(300),
             marketplace,
             buy_cooldown: Duration::from_secs(60),
-            channel,
         }
+    }
+
+    pub async fn init(&mut self) -> Result<()> {
+        for ticker in self.tickers.iter() {
+            let candles = self.marketplace.get_candles(ticker, "1m").await?;
+            let mut history = self.candle_event_history.write().await;
+            info!(
+                "Loaded {} candles for {}. Start={:?} End={:?}",
+                candles.len(),
+                ticker,
+                if candles.len() > 0 {
+                    DateTime::from_timestamp_millis(candles[0].start_time as i64)
+                } else {
+                    None
+                },
+                if candles.len() > 0 {
+                    DateTime::from_timestamp_millis(candles[candles.len() - 1].start_time as i64)
+                } else {
+                    None
+                }
+            );
+            history.insert(ticker.clone(), candles.into());
+        }
+
+        Ok(())
     }
 
     async fn add_trade_event_history(&mut self, event: TradeEvent) {
         let mut history = self.trade_event_history.write().await;
 
-        let history = history
-            .entry(event.ticker.clone())
-            .or_insert_with(|| VecDeque::with_capacity(500));
+        let history = history.entry(event.ticker.clone()).or_default();
+
         history.push_front(event);
-        if history.len() >= 500 {
+        if history.len() > 500 {
             history.pop_back();
         }
     }
@@ -69,29 +88,15 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
         let history = self.candle_event_history.read().await;
         let history = history.get(ticker)?;
 
-        let price_history: Vec<Decimal> = history
-            .iter()
-            .filter_map(|event| event.close_price)
-            .collect();
+        let price_history: Vec<Decimal> = history.iter().map(|event| event.close_price).collect();
 
         sma(&price_history, n)
-        //
-        //let history = self.trade_event_history.read().await;
-        //let history = history.get(ticker)?;
-        //
-        //let price_history: Vec<Decimal> = history.iter().map(|event| event.price).collect();
-        //sma(&price_history, n)
     }
 
     async fn add_candle_event_history(&mut self, event: CandleEvent) {
         let mut history = self.candle_event_history.write().await;
-        debug!("{:?}", event);
 
-        let history = history
-            .entry(event.ticker.clone())
-            .or_insert_with(|| VecDeque::with_capacity(20));
-
-        debug!("candle count for {} : {}", event.ticker, history.len());
+        let history = history.entry(event.ticker.clone()).or_default();
 
         if let Some(last) = history.pop_front() {
             if last.start_time != event.start_time {
@@ -109,7 +114,7 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
         let history = self.candle_event_history.read().await;
         let history = history.get(ticker)?;
 
-        let price_history: Vec<(Decimal, Decimal, Option<Decimal>)> = history
+        let price_history: Vec<(Decimal, Decimal, Decimal)> = history
             .iter()
             .map(|event| (event.high_price, event.low_price, event.close_price))
             .collect();
@@ -121,10 +126,7 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
         let history = self.candle_event_history.read().await;
         let history = history.get(ticker)?;
 
-        let price_history: Vec<Decimal> = history
-            .iter()
-            .filter_map(|event| event.close_price)
-            .collect();
+        let price_history: Vec<Decimal> = history.iter().map(|event| event.close_price).collect();
 
         wsma(&price_history, n)
     }
@@ -147,52 +149,35 @@ impl<M: MarketPlace> ScalpingStrategy<M> {
         }
         Err(format!("Asset {} not present in portfolio.", ticker.quote))
     }
-}
 
-impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
-    async fn on_candle_event(&mut self, event: &CandleEvent) -> Option<Order> {
+    async fn on_trade_event(&mut self, event: &TradeEvent) -> Result<super::StrategyAction> {
         if !self.tickers.contains(&event.ticker) {
-            return None;
-        }
-
-        self.add_candle_event_history(event.clone()).await;
-
-        None
-    }
-
-    async fn on_trade_event(&mut self, event: &TradeEvent) -> Option<Order> {
-        if !self.tickers.contains(&event.ticker) {
-            return None;
+            return Ok(StrategyAction::None);
         }
 
         self.add_trade_event_history(event.clone()).await;
 
-        let sma = self.get_sma(&event.ticker, 5).await?;
-        let wsma = self.get_wsma(&event.ticker, 14).await?;
+        let sma = self.get_wsma(&event.ticker, 5).await;
+        let wsma = self.get_wsma(&event.ticker, 14).await;
 
-        let long_atr = self.get_atr(&event.ticker, 10).await?;
-        let short_atr = self.get_atr(&event.ticker, 3).await?;
-
-        //let sma = self.get_sma(&event.ticker, 1).await?;
-        //let wsma = self.get_wsma(&event.ticker, 1).await?;
-        //
-        //let long_atr = self.get_atr(&event.ticker, 1).await?;
-        //let short_atr = self.get_atr(&event.ticker, 1).await?;
+        let long_atr = self.get_atr(&event.ticker, 10).await;
+        let short_atr = self.get_atr(&event.ticker, 3).await;
 
         let state = self.state.read().await;
 
         // if there is a pending order, wait for it to be processed
-        if let Some(pending_order) = state
-            .orders
-            .iter()
-            .find(|order| order.ticker == event.ticker && order.is_pending())
-        {
-            trace!(
-                "There is already a pending order for {} : skipping.",
-                event.ticker
-            );
-            trace!("{:?}", pending_order);
-            return None;
+        if let Some(_) = state.orders.iter().find(|order| {
+            order.ticker == event.ticker
+                && matches!(
+                    order.status,
+                    OrderStatus::Draft | OrderStatus::Sent | OrderStatus::Active
+                )
+        }) {
+            return Ok(StrategyAction::Continue {
+                ticker: event.ticker.clone(),
+                stop_propagation: true,
+                reason: "Existing order".to_string(),
+            });
         }
 
         // last order for this ticker
@@ -200,16 +185,20 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
 
         match last_order {
             Some(last_order) => {
-                match (last_order.1.order_type, last_order.1.order_status.clone()) {
-                    (OrderType::Buy, OrderStatus::Executed { ts: executed_at }) => {
+                match (last_order.1.side, last_order.1.status.clone()) {
+                    (OrderSide::Buy, OrderStatus::Executed) => {
                         let order = Order {
-                            order_type: OrderType::Sell,
-                            order_status: OrderStatus::Draft,
+                            creation_time: event.trade_time,
+                            working_time: None,
+                            sent_time: None,
+                            side: OrderSide::Sell,
+                            order_type: OrderType::Market,
+                            status: OrderStatus::Draft,
                             ticker: event.ticker.clone(),
                             amount: last_order.1.amount * dec!(0.999), // todo
                             price: event.price,
                             marketplace_id: None,
-                            fullfilled: dec!(0),
+                            filled_amount: dec!(0),
                             parent_order_price: Some(last_order.1.price),
                             trades: Vec::new(),
                         };
@@ -229,45 +218,66 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
                                 self.target_profit - take_profit,
                                 event.ticker.quote
                             );
-                            let _ = self.channel.send(StrategyEvent::DiscardedSell {
+                            return Ok(StrategyAction::Continue {
+                                ticker: event.ticker.clone(),
+                                stop_propagation: true,
                                 reason,
-                                order: last_order.1.clone(),
                             });
-                            return None;
                         }
 
-                        if sma > wsma
-                            && event.price > sma
-                            && take_profit < self.target_profit * dec!(2)
-                        {
-                            let reason = format!(
-                                "SMA {} > WSMA {} or price {} > SMA : skipping sell.",
-                                sma, wsma, event.price
-                            );
-                            let _ = self.channel.send(StrategyEvent::DiscardedSell {
-                                reason,
-                                order: last_order.1.clone(),
-                            });
-                            return None;
+                        match (sma, wsma) {
+                            (Some(sma), Some(wsma)) => {
+                                if event.price > sma && take_profit < self.target_profit * dec!(5) {
+                                    let reason = format!(
+                                        "SMA {} > WSMA {} or price {} > SMA : skipping sell.",
+                                        sma, wsma, event.price
+                                    );
+                                    return Ok(StrategyAction::Continue {
+                                        ticker: event.ticker.clone(),
+                                        stop_propagation: false,
+                                        reason,
+                                    });
+                                }
+                            }
+                            _ => {
+                                let reason = format!("SMA or WSMA missing");
+                                return Ok(StrategyAction::Continue {
+                                    ticker: event.ticker.clone(),
+                                    stop_propagation: false,
+                                    reason,
+                                });
+                            }
                         }
 
-                        return Some(order);
+                        return Ok(StrategyAction::Order { order });
                     }
-                    (OrderType::Sell, OrderStatus::Executed { ts: executed_at }) => {
-                        let time_since_sell = event.trade_time - executed_at;
+                    (OrderSide::Sell, OrderStatus::Executed) => {
+                        let time_since_sell = match last_order.1.get_last_trade_time() {
+                            Some(last_trade_time) if event.trade_time >= last_trade_time => {
+                                Some(event.trade_time - last_trade_time)
+                            }
+                            _ => None,
+                        };
 
                         // too soon for reentry
-                        if event.trade_time <= executed_at
-                            || time_since_sell < self.buy_cooldown.as_millis() as u64
-                        {
-                            trace!("Too soon for re-entry");
-                            return None;
+                        match time_since_sell {
+                            Some(time_since_sell)
+                                if time_since_sell < self.buy_cooldown.as_millis() as u64 =>
+                            {
+                                let reason = format!("Too soon for re-entry");
+                                return Ok(StrategyAction::Continue {
+                                    ticker: event.ticker.clone(),
+                                    stop_propagation: true,
+                                    reason,
+                                });
+                            }
+                            _ => {}
                         }
 
                         let last_buy =
-                            state.get_last_executed_order(&event.ticker, Some(OrderType::Buy));
+                            state.get_last_executed_order(&event.ticker, Some(OrderSide::Buy));
                         let first_buy =
-                            state.get_first_executed_order(&event.ticker, Some(OrderType::Buy));
+                            state.get_first_executed_order(&event.ticker, Some(OrderSide::Buy));
 
                         let potential_order = match self.get_desired_buy_amount(
                             &event.ticker,
@@ -276,13 +286,17 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
                         ) {
                             Ok(amount) => {
                                 let mut order = Order {
-                                    order_type: OrderType::Buy,
-                                    order_status: OrderStatus::Draft,
+                                    creation_time: event.trade_time,
+                                    working_time: None,
+                                    sent_time: None,
+                                    side: OrderSide::Buy,
+                                    order_type: OrderType::Market,
+                                    status: OrderStatus::Draft,
                                     ticker: event.ticker.clone(),
                                     amount,
                                     price: event.price,
                                     marketplace_id: None,
-                                    fullfilled: dec!(0),
+                                    filled_amount: dec!(0),
                                     parent_order_price: Some(last_order.1.price),
                                     trades: Vec::new(),
                                 };
@@ -304,138 +318,212 @@ impl<M: MarketPlace> Strategy for ScalpingStrategy<M> {
                                 // reentry logic
                                 //
 
-                                //if last_buy.1.price <= event.price
-                                //    && first_buy.1.price <= event.price
-                                //{
-                                //    let reason = format!(
-                                //        "First ({}) and last ({}) buy order price higher than current price : skipping buy.",
-                                //        first_buy.1.price,
-                                //        last_buy.1.price
-                                //    );
-                                //    let _ = self.channel.send(StrategyEvent::DiscardedSell {
-                                //        reason,
-                                //        order: last_order.1.clone(),
-                                //    });
-                                //    return None;
-                                //}
+                                let skip_condition = match time_since_sell {
+                                    Some(time_since_sell) => {
+                                        time_since_sell
+                                            > Duration::from_secs(24 * 3600).as_millis() as u64
+                                    }
+                                    None => true,
+                                };
 
-                                if sma < wsma {
-                                    let message = format!("SMA < WSMA : skipping buy.");
-                                    let _ = self.channel.send(StrategyEvent::Info {
-                                        message,
-                                        order: Some(last_order.1.clone()),
+                                if last_buy.1.price <= event.price
+                                    && first_buy.1.price <= event.price
+                                    && !skip_condition
+                                {
+                                    let reason = format!(
+                                        "First ({}) and last ({}) buy order price higher than current price : skipping buy.",
+                                        first_buy.1.price,
+                                        last_buy.1.price
+                                    );
+                                    return Ok(StrategyAction::Continue {
+                                        ticker: event.ticker.clone(),
+                                        stop_propagation: false,
+                                        reason,
                                     });
-                                    return None;
                                 }
 
-                                if time_since_sell < Duration::from_secs(60 * 10).as_millis() as u64
-                                    && short_atr < long_atr
-                                {
-                                    let message = format!(
-                                        "Average true range lower than usual : skipping buy."
-                                    );
-                                    let _ = self.channel.send(StrategyEvent::Info {
-                                        message,
-                                        order: Some(last_order.1.clone()),
-                                    });
-                                    return None;
+                                if !skip_condition {
+                                    match (sma, wsma) {
+                                        (Some(sma), Some(wsma)) => {
+                                            if sma < wsma {
+                                                let reason = format!("SMA < WSMA : skipping buy.");
+                                                return Ok(StrategyAction::Continue {
+                                                    ticker: event.ticker.clone(),
+                                                    stop_propagation: false,
+                                                    reason,
+                                                });
+                                            }
+                                            if sma > event.price {
+                                                let reason = format!("SMA > price : skipping buy.");
+                                                return Ok(StrategyAction::Continue {
+                                                    ticker: event.ticker.clone(),
+                                                    stop_propagation: false,
+                                                    reason,
+                                                });
+                                            }
+                                        }
+                                        _ => {
+                                            let reason =
+                                                format!("SMA or WSMA missing : skipping buy.");
+                                            return Ok(StrategyAction::Continue {
+                                                ticker: event.ticker.clone(),
+                                                stop_propagation: false,
+                                                reason,
+                                            });
+                                        }
+                                    }
+
+                                    match (short_atr, long_atr) {
+                                        (Some(short_atr), Some(long_atr)) => {
+                                            if short_atr < long_atr {
+                                                let reason = format!("Average true range lower than usual : skipping buy.");
+
+                                                return Ok(StrategyAction::Continue {
+                                                    ticker: event.ticker.clone(),
+                                                    stop_propagation: false,
+                                                    reason,
+                                                });
+                                            }
+                                        }
+                                        _ => {
+                                            let reason = format!("ATR missing : skipping buy.");
+                                            return Ok(StrategyAction::Continue {
+                                                ticker: event.ticker.clone(),
+                                                stop_propagation: false,
+                                                reason,
+                                            });
+                                        }
+                                    }
                                 }
 
                                 let pullback_pct =
                                     (last_order.1.price - event.price) / last_order.1.price;
 
-                                if time_since_sell < Duration::from_secs(60 * 10).as_millis() as u64
-                                    && pullback_pct < dec!(0.01)
-                                {
-                                    let message = format!(
+                                if !skip_condition && pullback_pct < dec!(0.01) {
+                                    let reason = format!(
                                         "No significant pullback since last sell : skipping buy."
                                     );
-                                    let _ = self.channel.send(StrategyEvent::Info {
-                                        message,
-                                        order: Some(last_order.1.clone()),
+                                    return Ok(StrategyAction::Continue {
+                                        ticker: event.ticker.clone(),
+                                        stop_propagation: false,
+                                        reason,
                                     });
-                                    return None;
                                 }
 
-                                if sma >= event.price {
-                                    let message = format!("SMA > price : skipping buy.");
-                                    let _ = self.channel.send(StrategyEvent::Info {
-                                        message,
-                                        order: Some(last_order.1.clone()),
-                                    });
-                                    return None;
-                                }
-
-                                return Some(potential_order);
+                                return Ok(StrategyAction::Order {
+                                    order: potential_order,
+                                });
                             }
                             _ => {}
                         };
-                        return None;
+                        return Ok(StrategyAction::None);
                     }
-                    _ => return None,
+                    _ => return Ok(StrategyAction::None),
                 }
             }
             None => {
-                match self.get_desired_buy_amount(&event.ticker, &state.portfolio, event.price) {
-                    Ok(amount) => {
-                        //
-                        // entry logic
-                        //
-
-                        if sma >= event.price {
-                            let message = format!("SMA > price : skipping entry.");
-                            let _ = self.channel.send(StrategyEvent::Info {
-                                message,
-                                order: None,
+                let amount = self
+                    .get_desired_buy_amount(&event.ticker, &state.portfolio, event.price)
+                    .map_err(|err| anyhow!("{}", err))?;
+                //
+                // entry logic
+                //
+                match (wsma, sma) {
+                    (Some(wsma), Some(sma)) => {
+                        if wsma > event.price {
+                            let reason = format!("SMA > price : skipping entry.");
+                            return Ok(StrategyAction::Continue {
+                                ticker: event.ticker.clone(),
+                                stop_propagation: false,
+                                reason,
                             });
-                            return None;
                         }
-
-                        if short_atr < long_atr {
-                            let message =
-                                format!("Average true range lower than usual : skipping entry.");
-                            let _ = self.channel.send(StrategyEvent::Info {
-                                message,
-                                order: None,
-                            });
-                            return None;
-                        }
-
                         if sma < wsma {
-                            let message = format!("SMA < WSMA : skipping entry.");
-                            let _ = self.channel.send(StrategyEvent::Info {
-                                message,
-                                order: None,
+                            let reason = format!("SMA < WSMA : skipping entry.");
+                            return Ok(StrategyAction::Continue {
+                                ticker: event.ticker.clone(),
+                                stop_propagation: false,
+                                reason,
                             });
-                            return None;
                         }
-
-                        let mut order = Order {
-                            order_type: OrderType::Buy,
-                            order_status: OrderStatus::Draft,
-                            ticker: event.ticker.clone(),
-                            amount,
-                            price: event.price,
-                            marketplace_id: None,
-                            fullfilled: dec!(0),
-                            parent_order_price: None,
-                            trades: Vec::new(),
-                        };
-
-                        match self
-                            .marketplace
-                            .adjust_order_price_and_amount(&mut order)
-                            .await
-                        {
-                            Ok(()) => {
-                                return Some(order);
-                            }
-                            Err(_err) => {}
-                        };
                     }
-                    Err(_err) => {}
+                    _ => return Ok(StrategyAction::None),
                 }
-                return None;
+
+                match (short_atr, long_atr) {
+                    (Some(short_atr), Some(long_atr)) => {
+                        if short_atr < long_atr {
+                            let reason =
+                                format!("Average true range lower than usual : skipping entry.");
+                            return Ok(StrategyAction::Continue {
+                                ticker: event.ticker.clone(),
+                                stop_propagation: false,
+                                reason,
+                            });
+                        }
+                    }
+                    _ => return Ok(StrategyAction::None),
+                }
+
+                let mut order = Order {
+                    creation_time: event.trade_time,
+                    working_time: None,
+                    sent_time: None,
+                    side: OrderSide::Buy,
+                    order_type: OrderType::Market,
+                    status: OrderStatus::Draft,
+                    ticker: event.ticker.clone(),
+                    amount,
+                    price: event.price,
+                    marketplace_id: None,
+                    filled_amount: dec!(0),
+                    parent_order_price: None,
+                    trades: Vec::new(),
+                };
+
+                match self
+                    .marketplace
+                    .adjust_order_price_and_amount(&mut order)
+                    .await
+                {
+                    Ok(()) => {
+                        return Ok(StrategyAction::Order { order });
+                    }
+                    Err(err) => {
+                        return Err(err);
+                    }
+                };
+            }
+        }
+    }
+}
+
+impl<M> Strategy for ScalpingStrategy<M>
+where
+    M: MarketPlace + MarketPlaceSettings + MarketPlaceData,
+{
+    async fn on_marketplace_event(
+        &mut self,
+        event: crate::marketplace::MarketPlaceEvent,
+    ) -> Result<super::StrategyAction> {
+        match event {
+            MarketPlaceEvent::Trade(event) => self.on_trade_event(&event).await,
+            MarketPlaceEvent::Candle(event) => {
+                if !self.tickers.contains(&event.ticker) {
+                    return Ok(StrategyAction::Continue {
+                        ticker: event.ticker.clone(),
+                        stop_propagation: false,
+                        reason: "Other ticker".to_string(),
+                    });
+                }
+
+                self.add_candle_event_history(event.clone()).await;
+
+                Ok(StrategyAction::Continue {
+                    ticker: event.ticker.clone(),
+                    stop_propagation: false,
+                    reason: "None".to_string(),
+                })
             }
         }
     }

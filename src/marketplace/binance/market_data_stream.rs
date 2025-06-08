@@ -12,7 +12,11 @@ use tracing::error;
 use tracing::info;
 use tungstenite::Message;
 
+use crate::marketplace::CandleEvent;
+use crate::marketplace::MarketPlaceEvent;
+use crate::marketplace::TradeEvent;
 use crate::ticker::Ticker;
+use crate::AppEvent;
 
 use super::Binance;
 
@@ -68,8 +72,8 @@ pub struct KLineData {
     pub open_price: Decimal,
 
     #[serde(rename = "c")]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    pub close_price: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub close_price: Decimal,
 
     #[serde(rename = "h")]
     #[serde(with = "rust_decimal::serde::str")]
@@ -127,11 +131,7 @@ pub struct TradeStream {
 }
 
 impl Binance {
-    pub async fn listen_trade_stream(
-        &self,
-        tickers: Vec<Ticker>,
-        tx: Sender<crate::marketplace::MarketPlaceEvent>,
-    ) {
+    pub async fn listen_trade_stream(&self, tickers: &Vec<Ticker>, tx: Sender<AppEvent>) {
         let trade_params = tickers
             .iter()
             .map(|s| format!("{}{}@trade", s.base.to_lowercase(), s.quote.to_lowercase()))
@@ -195,17 +195,18 @@ impl Binance {
                                                 Ok(trade) => {
                                                     match Ticker::try_from(&trade.symbol) {
                                                         Ok(ticker) => {
-                                                            let _ = tx.send(
-                                                                crate::marketplace::MarketPlaceEvent::Trade(
-                                                                    crate::marketplace::TradeEvent {
+                                                            let _ = tx.send(AppEvent::MarketPlace(
+                                                                MarketPlaceEvent::Trade(
+                                                                    TradeEvent {
                                                                         ticker,
                                                                         price: trade.price,
                                                                         quantity: trade.quantity,
                                                                         trade_id: trade.trade_id,
-                                                                        trade_time: trade.trade_time,
+                                                                        trade_time: trade
+                                                                            .trade_time,
                                                                     },
                                                                 ),
-                                                            );
+                                                            ));
                                                         }
                                                         Err(..) => {
                                                             error!("Stream parsing error : failed to parse ticker {}", trade.symbol);
@@ -224,22 +225,36 @@ impl Binance {
                                                 Ok(candle) => {
                                                     match Ticker::try_from(&candle.symbol) {
                                                         Ok(ticker) => {
-                                                            let _ = tx.send(
-                                                                crate::marketplace::MarketPlaceEvent::Candle(
-                                                                    crate::marketplace::CandleEvent {
+                                                            let _ = tx.send(AppEvent::MarketPlace(
+                                                                MarketPlaceEvent::Candle(
+                                                                    CandleEvent {
                                                                         ticker,
-                                                                        high_price: candle.data.high_price,
-                                                                        low_price: candle.data.low_price,
-                                                                        start_time: candle.data.start_time,
-                                                                        close_time: candle.data.close_time,
-                                                                        trade_count: candle.data.trade_count,
+                                                                        high_price: candle
+                                                                            .data
+                                                                            .high_price,
+                                                                        low_price: candle
+                                                                            .data
+                                                                            .low_price,
+                                                                        start_time: candle
+                                                                            .data
+                                                                            .start_time,
+                                                                        close_time: candle
+                                                                            .data
+                                                                            .close_time,
+                                                                        trade_count: candle
+                                                                            .data
+                                                                            .trade_count,
                                                                         volume: candle.data.volume,
                                                                         closed: candle.data.closed,
-                                                                        open_price: candle.data.open_price,
-                                                                        close_price: candle.data.close_price
+                                                                        open_price: candle
+                                                                            .data
+                                                                            .open_price,
+                                                                        close_price: candle
+                                                                            .data
+                                                                            .close_price,
                                                                     },
                                                                 ),
-                                                            );
+                                                            ));
                                                         }
                                                         Err(..) => {
                                                             error!("Stream parsing error : failed to parse ticker {}", candle.symbol);

@@ -8,10 +8,6 @@ default-run = "bot"
 name = "bot"
 path = "src/bin/main.rs"
 
-[[bin]]
-name = "tui"
-path = "src/bin/tui.rs"
-
 [dependencies]
 anyhow = "1.0.96"
 axum = { version = "0.8.4", features = ["ws"] }

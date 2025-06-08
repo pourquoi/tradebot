@@ -1,6 +1,13 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::marketplace::binance::utils::ceil_to_step;
+use crate::order::Order;
+use crate::portfolio::Asset;
+use crate::ticker::Ticker;
+use crate::AppEvent;
 use account_api::AccountOverview;
+use anyhow::anyhow;
 use anyhow::{Context, Result};
 use exchange_info_api::ExchangeInfo;
 use exchange_info_api::SymbolInfoFilter;
@@ -10,8 +17,10 @@ use rust_decimal_macros::dec;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
 
-use crate::order::Order;
-use crate::ticker::Ticker;
+use super::MarketPlaceSettings;
+use super::MarketPlaceStream;
+use super::MarketPlaceTrade;
+use super::{MarketPlaceAccount, MarketPlaceData};
 
 const ENDPOINT: &str = "https://api.binance.com";
 const PUBLIC_MARKET_ENDPOINT: &str = "https://data-api.binance.vision";
@@ -20,6 +29,8 @@ pub mod account_api;
 pub mod exchange_info_api;
 pub mod market_data_api;
 pub mod market_data_stream;
+pub mod trade_api;
+mod utils;
 
 #[derive(Default, Debug, Clone)]
 pub struct Binance {
@@ -36,30 +47,34 @@ impl Binance {
             ..Default::default()
         }
     }
+
+    pub async fn init(&mut self, tickers: &Vec<Ticker>) -> Result<()> {
+        let mut exchange_info = self.exchange_info.write().await;
+        *exchange_info = {
+            let res = self.get_exchange_info(tickers).await?;
+            Some(res)
+        };
+        let _ = self.get_account_overview(true).await?;
+        Ok(())
+    }
 }
 
-impl crate::marketplace::MarketPlace for Binance {
-    async fn get_fees(&self, order: &Order) -> Decimal {
+impl crate::marketplace::MarketPlace for Binance {}
+
+impl MarketPlaceStream for Binance {
+    async fn start(&mut self, tickers: &Vec<Ticker>, tx: Sender<AppEvent>) {
+        self.listen_trade_stream(&tickers, tx).await;
+    }
+}
+
+impl MarketPlaceSettings for Binance {
+    async fn get_fees(&self, _order: &Order) -> Decimal {
         let account = self.account_overview.read().await;
         let account = account.as_ref();
         match account {
             Some(account) => account.commission_rates.taker,
             None => dec!(0.001),
         }
-    }
-
-    async fn init(&mut self, tickers: Vec<Ticker>) -> Result<()> {
-        let mut exchange_info = self.exchange_info.write().await;
-        *exchange_info = {
-            let res = self.get_exchange_info(&tickers).await?;
-            Some(res)
-        };
-        let mut account_overview = self.account_overview.write().await;
-        *account_overview = {
-            let res = self.get_account_overview().await?;
-            Some(res)
-        };
-        Ok(())
     }
 
     async fn adjust_order_price_and_amount(&self, order: &mut Order) -> Result<()> {
@@ -123,25 +138,67 @@ impl crate::marketplace::MarketPlace for Binance {
         order.amount = amount;
         Ok(())
     }
+}
 
-    async fn start(
-        &mut self,
-        tickers: Vec<Ticker>,
-        tx: Sender<crate::marketplace::MarketPlaceEvent>,
-    ) {
-        self.listen_trade_stream(tickers, tx).await;
-    }
-
-    async fn ping(&self) -> Result<()> {
-        let _ = self
-            .client
-            .get(format!("{ENDPOINT}/api/v3/ping"))
-            .send()
+impl MarketPlaceData for Binance {
+    async fn get_candles(
+        &self,
+        ticker: &Ticker,
+        interval: &str,
+    ) -> Result<Vec<super::CandleEvent>> {
+        let candles = self
+            .get_candles(format!("{}", ticker).as_str(), interval)
             .await?;
-        Ok(())
+        Ok(candles
+            .into_iter()
+            .map(|candle| candle.into_candle_event(ticker.clone()))
+            .collect())
     }
 }
 
-fn ceil_to_step(value: Decimal, step: Decimal) -> Decimal {
-    ((value / step).ceil()) * step
+impl MarketPlaceAccount for Binance {
+    async fn get_account_assets(&mut self) -> Result<HashMap<String, Asset>> {
+        let account_overview = self.get_account_overview(false).await?;
+
+        let assets = account_overview
+            .balances
+            .iter()
+            .map(|balance| {
+                (
+                    balance.asset.clone(),
+                    Asset {
+                        symbol: balance.asset.clone(),
+                        amount: balance.free,
+                        value: None,
+                    },
+                )
+            })
+            .collect::<HashMap<String, Asset>>();
+
+        Ok(assets)
+    }
+}
+
+impl MarketPlaceTrade for Binance {
+    async fn get_orders(&self, tickers: &Vec<Ticker>) -> Result<Vec<Order>> {
+        let mut orders = Vec::new();
+        for ticker in tickers {
+            for order in self
+                .get_open_orders(ticker)
+                .await?
+                .iter()
+                .flat_map(|order| order.try_into())
+                .into_iter()
+            {
+                orders.push(order);
+            }
+        }
+
+        Ok(orders)
+    }
+
+    async fn place_order(&self, order: &Order) -> Result<Order> {
+        let res = self.place_order(order).await?;
+        Order::try_from(res).map_err(|err| anyhow!(err))
+    }
 }

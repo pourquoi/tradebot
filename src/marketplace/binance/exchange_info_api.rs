@@ -101,4 +101,13 @@ impl Binance {
 
         Ok(r)
     }
+
+    async fn ping(&self) -> Result<()> {
+        let _ = self
+            .client
+            .get(format!("{ENDPOINT}/api/v3/ping"))
+            .send()
+            .await?;
+        Ok(())
+    }
 }

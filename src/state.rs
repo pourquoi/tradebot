@@ -5,7 +5,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    order::{Order, OrderStatus, OrderType},
+    order::{Order, OrderStatus, OrderSide},
     portfolio::{self, Portfolio},
     ticker::Ticker,
 };
@@ -31,16 +31,16 @@ impl State {
     }
 
     pub fn add_order(&mut self, order: Order) -> Result<Order, String> {
-        if order.order_status != OrderStatus::Draft {
+        if order.status != OrderStatus::Draft {
             return Err(format!("Order is not a draft"));
         }
 
-        let enough_funds = match order.order_type {
-            OrderType::Buy => match self.portfolio.assets.get(&order.ticker.quote) {
+        let enough_funds = match order.side {
+            OrderSide::Buy => match self.portfolio.assets.get(&order.ticker.quote) {
                 Some(asset) => asset.amount >= order.price * order.amount,
                 None => false,
             },
-            OrderType::Sell => true,
+            OrderSide::Sell => true,
         };
 
         if !enough_funds {
@@ -49,24 +49,24 @@ impl State {
 
         self.orders.push(order.clone());
 
-        return Ok(order);
+        Ok(order)
     }
 
     pub fn get_first_executed_order(
         &self,
         ticker: &Ticker,
-        order_type: Option<OrderType>,
+        order_type: Option<OrderSide>,
     ) -> Option<(usize, &Order)> {
         self.orders
             .iter()
             .enumerate()
             .filter(|(_i, order)| {
                 order.ticker == *ticker
-                    && order_type.is_none_or(|t| t == order.order_type)
-                    && order.is_executed()
+                    && order_type.is_none_or(|t| t == order.side)
+                    && matches!(order.status, OrderStatus::Executed)
             })
-            .min_by(|a, b| match (&a.1.order_status, &b.1.order_status) {
-                (OrderStatus::Executed { ts: ts_a }, OrderStatus::Executed { ts: ts_b }) => {
+            .min_by(|a, b| match (&a.1.working_time, &b.1.working_time) {
+                (Some(ts_a), Some(ts_b)) => {
                     ts_a.cmp(ts_b)
                 }
                 _ => Ordering::Equal,
@@ -76,18 +76,18 @@ impl State {
     pub fn get_last_executed_order(
         &self,
         ticker: &Ticker,
-        order_type: Option<OrderType>,
+        order_type: Option<OrderSide>,
     ) -> Option<(usize, &Order)> {
         self.orders
             .iter()
             .enumerate()
             .filter(|(_i, order)| {
                 order.ticker == *ticker
-                    && order_type.is_none_or(|t| t == order.order_type)
-                    && order.is_executed()
+                    && order_type.is_none_or(|t| t == order.side)
+                    && matches!(order.status, OrderStatus::Executed)
             })
-            .max_by(|a, b| match (&a.1.order_status, &b.1.order_status) {
-                (OrderStatus::Executed { ts: ts_a }, OrderStatus::Executed { ts: ts_b }) => {
+            .max_by(|a, b| match (&a.1.working_time, &b.1.working_time) {
+                (Some(ts_a), Some(ts_b)) => {
                     ts_a.cmp(ts_b)
                 }
                 _ => Ordering::Equal,
@@ -98,7 +98,7 @@ impl State {
         self.orders
             .iter()
             .filter(|order| {
-                matches!(order.order_type, OrderType::Sell) && order.ticker.quote == quote_asset
+                matches!(order.side, OrderSide::Sell) && order.ticker.quote == quote_asset
             })
             .fold(dec!(0), |acc, order| {
                 if let Some(parent_order_price) = order.parent_order_price {

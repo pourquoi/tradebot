@@ -9,18 +9,37 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::marketplace::binance::{Binance, PUBLIC_MARKET_ENDPOINT};
+use crate::marketplace::CandleEvent;
+use crate::ticker::Ticker;
 
 #[derive(Deserialize, Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct Candle {
-    pub open_time: i64,
-    pub close_time: i64,
+    pub start_time: u64,
+    pub close_time: u64,
     pub open_price: Decimal,
     pub close_price: Decimal,
     pub high_price: Decimal,
     pub low_price: Decimal,
-    pub trade_count: u32,
+    pub trade_count: u64,
     pub volume: Decimal,
+}
+
+impl Candle {
+    pub fn into_candle_event(self, ticker: Ticker) -> CandleEvent {
+        CandleEvent {
+            ticker,
+            open_price: self.open_price,
+            close_price: self.close_price,
+            high_price: self.high_price,
+            low_price: self.low_price,
+            trade_count: self.trade_count,
+            start_time: self.start_time,
+            close_time: self.close_time,
+            volume: self.volume,
+            closed: true,
+        }
+    }
 }
 
 impl TryFrom<Value> for Candle {
@@ -36,10 +55,10 @@ impl TryFrom<Value> for Candle {
             return Err(anyhow!("Candle array needs at least 11 elements"));
         }
         let candle = Candle {
-            open_time: value[0]
-                .as_i64()
+            start_time: value[0]
+                .as_u64()
                 .ok_or_else(|| anyhow!("Invalid open time"))?,
-            close_time: value[6].as_i64().ok_or(anyhow!("Invalid close time"))?,
+            close_time: value[6].as_u64().ok_or(anyhow!("Invalid close time"))?,
             open_price: value[1]
                 .as_str()
                 .ok_or(anyhow!("Invalid open price"))
@@ -78,7 +97,7 @@ impl Serialize for Candle {
     {
         let mut seq = serializer.serialize_seq(Some(12))?;
         // Kline open time
-        seq.serialize_element(&self.open_time)?;
+        seq.serialize_element(&self.start_time)?;
         // Open price
         seq.serialize_element(&self.open_price)?;
         // High price
@@ -107,7 +126,6 @@ impl Serialize for Candle {
 }
 
 impl Binance {
-    #[allow(dead_code)]
     pub async fn get_candles(&self, symbol: &str, interval: &str) -> Result<Vec<Candle>> {
         let params = [("symbol", symbol), ("interval", interval)];
         let url = Url::parse_with_params(
@@ -115,10 +133,8 @@ impl Binance {
             &params,
         )
         .unwrap();
-        println!("Getting candles {}", url);
         let r = self.client.get(url).send().await?;
-        let r = r.text().await.unwrap();
-        let r: Vec<Value> = serde_json::de::from_str(r.as_str()).unwrap();
+        let r: Vec<Value> = r.json().await?;
         Ok(r.into_iter()
             .flat_map(|v| v.try_into())
             .collect::<Vec<Candle>>())
@@ -156,13 +172,13 @@ mod tests {
     #[test]
     fn test_candle_to_json() {
         let candle = Candle {
-            open_time: 1499040000000_i64,
+            start_time: 1499040000000_u64,
             open_price: dec!(0.01634790),
             high_price: dec!(0.80000000),
             low_price: dec!(0.01575800),
             close_price: dec!(0.01577100),
             volume: dec!(148976.11427815),
-            close_time: 1499644799999_i64,
+            close_time: 1499644799999_u64,
             trade_count: 308,
         };
 

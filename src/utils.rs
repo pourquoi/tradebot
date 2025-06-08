@@ -31,7 +31,7 @@ pub fn wsma(prices: &[Decimal], period: usize) -> Option<Decimal> {
     }
 }
 
-pub fn atr(prices: &[(Decimal, Decimal, Option<Decimal>)], n: usize) -> Option<Decimal> {
+pub fn atr(prices: &[(Decimal, Decimal, Decimal)], n: usize) -> Option<Decimal> {
     if prices.len() < n {
         return None;
     }
@@ -40,19 +40,15 @@ pub fn atr(prices: &[(Decimal, Decimal, Option<Decimal>)], n: usize) -> Option<D
     let mut count = 0;
 
     for &(high, low, prev_close) in &prices[0..n] {
-        let tr = if let Some(prev_close) = prev_close {
-            [
-                high - low,
-                (high - prev_close).abs(),
-                (low - prev_close).abs(),
-            ]
-            .iter()
-            .copied()
-            .max()
-            .unwrap()
-        } else {
-            high - low
-        };
+        let tr = [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ]
+        .iter()
+        .copied()
+        .max()
+        .unwrap();
 
         tr_sum += tr;
         count += 1;
