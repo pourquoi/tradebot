@@ -709,12 +709,14 @@ async fn simulate_orders_processing<M>(
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             if processed {
-                info!(
-                    "\n## Portfolio: \n{}\n## {} {}",
-                    state.portfolio,
-                    "Scalped".yellow(),
-                    state.get_total_scalped("USDT".to_string())
-                );
+                info!("{}", state.portfolio,);
+                for (symbol, _) in &state.portfolio.assets {
+                    info!(
+                        "{} scalped : {}",
+                        symbol,
+                        state.get_total_scalped(symbol.clone())
+                    );
+                }
                 let _ = tx_app.send(AppEvent::State(StateEvent::Portfolio(
                     state.portfolio.clone(),
                 )));
@@ -745,12 +747,14 @@ async fn print_overview(state: Arc<RwLock<State>>) {
     loop {
         {
             let state = state.read().await;
-            info!(
-                "\n## Portfolio: {}\n## {} {}",
-                state.portfolio,
-                "Scalped".yellow(),
-                state.get_total_scalped("USDT".to_string())
-            );
+            info!("{}", state.portfolio,);
+            for (symbol, _) in &state.portfolio.assets {
+                info!(
+                    "{} scalped : {}",
+                    symbol,
+                    state.get_total_scalped(symbol.clone())
+                );
+            }
         }
         tokio::time::sleep(Duration::from_secs(60)).await;
     }

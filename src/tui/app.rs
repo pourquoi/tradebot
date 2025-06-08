@@ -253,21 +253,22 @@ impl App {
         let [left_area, right_area] =
             Layout::horizontal([Constraint::Max(40), Constraint::Fill(1)]).areas(main_area);
 
-        let [top_left_area, bottom_left_area] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Max(10)]).areas(left_area);
+        let [top_left_area, middle_left_area, bottom_left_area] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Max(10),
+            Constraint::Max(10),
+        ])
+        .areas(left_area);
 
         let [top_right_area, bottom_right_area] =
-            Layout::vertical([Constraint::Percentage(30), Constraint::Fill(1)]).areas(right_area);
-
-        let [top_middle_area, top_right_area] =
-            Layout::horizontal([Constraint::Fill(1), Constraint::Max(40)]).areas(top_right_area);
+            Layout::vertical([Constraint::Percentage(60), Constraint::Fill(1)]).areas(right_area);
 
         self.render_header(frame, header_area);
         self.render_footer(frame, footer_area);
         self.render_portfolio(frame, top_left_area);
 
-        self.render_candles(frame, top_middle_area);
-        self.render_trades(frame, top_right_area);
+        self.render_candles(frame, top_right_area);
+        self.render_trades(frame, middle_left_area);
 
         self.render_strategy_log(frame, bottom_left_area);
 
@@ -513,7 +514,7 @@ impl App {
                     .borders(Borders::ALL);
                 let ticker = Ticker::new(asset.symbol.as_str(), "USDT");
                 if let Some(candles) = self.candles.get_mut(&ticker) {
-                    let data: Vec<(f64, f64)> = candles
+                    let data_candles: Vec<(f64, f64)> = candles
                         .make_contiguous()
                         .windows(10)
                         .map(|candles| {
@@ -533,23 +534,39 @@ impl App {
                             )
                         })
                         .collect();
-                    if data.is_empty() {
+                    if data_candles.is_empty() {
                         error = Some(format!("No candles for {} yet", ticker));
                     } else {
-                        let start = data.iter().map(|d| d.0).reduce(f64::min).unwrap_or(0.);
-                        let end = data.iter().map(|d| d.0).reduce(f64::max).unwrap_or(0.);
+                        let start = data_candles
+                            .iter()
+                            .map(|d| d.0)
+                            .reduce(f64::min)
+                            .unwrap_or(0.);
+                        let end = data_candles
+                            .iter()
+                            .map(|d| d.0)
+                            .reduce(f64::max)
+                            .unwrap_or(0.);
 
-                        let min_close = data.iter().map(|d| d.1).reduce(f64::min).unwrap_or(0.);
-                        let max_close = data.iter().map(|d| d.1).reduce(f64::max).unwrap_or(0.);
+                        let min_close = data_candles
+                            .iter()
+                            .map(|d| d.1)
+                            .reduce(f64::min)
+                            .unwrap_or(0.);
+                        let max_close = data_candles
+                            .iter()
+                            .map(|d| d.1)
+                            .reduce(f64::max)
+                            .unwrap_or(0.);
 
-                        let last_close = if data.len() > 0 {
-                            data[data.len() - 1].1
+                        let last_close = if data_candles.len() > 0 {
+                            data_candles[data_candles.len() - 1].1
                         } else {
                             0.
                         };
 
-                        let start_time = if data.len() > 0 {
-                            DateTime::from_timestamp_millis(data[0].0 as i64)
+                        let start_time = if data_candles.len() > 0 {
+                            DateTime::from_timestamp_millis(data_candles[0].0 as i64)
                                 .unwrap()
                                 .format("%d %H:%M")
                                 .to_string()
@@ -557,39 +574,73 @@ impl App {
                             String::from("-")
                         };
 
-                        let end_time = if data.len() > 0 {
-                            DateTime::from_timestamp_millis(data[data.len() - 1].0 as i64)
-                                .unwrap()
-                                .format("%d %H:%M")
-                                .to_string()
+                        let end_time = if data_candles.len() > 0 {
+                            DateTime::from_timestamp_millis(
+                                data_candles[data_candles.len() - 1].0 as i64,
+                            )
+                            .unwrap()
+                            .format("%d %H:%M")
+                            .to_string()
                         } else {
                             String::from("-")
                         };
 
-                        let dataset = Dataset::default()
-                            .data(&data)
+                        let dataset_candles = Dataset::default()
+                            .data(&data_candles)
                             .marker(symbols::Marker::Dot)
-                            .style(Style::default().fg(tailwind::BLUE.c500))
+                            .style(Style::default().fg(tailwind::WHITE))
                             .graph_type(ratatui::widgets::GraphType::Line);
 
-                        let chart = Chart::new(vec![dataset])
-                            .x_axis(
-                                Axis::default()
-                                    .title("Time")
-                                    .bounds([start, end])
-                                    .labels([start_time, end_time]),
-                            )
-                            .y_axis(
-                                Axis::default()
-                                    .title("Price")
-                                    .bounds([min_close, max_close])
-                                    .labels([
-                                        format!("{}", min_close),
-                                        format!("{}", last_close),
-                                        format!("{}", max_close),
-                                    ]),
-                            )
-                            .block(block.clone());
+                        let data_buy_orders: Vec<(f64, f64)> = self
+                            .get_orders()
+                            .iter()
+                            .filter(|order| order.side == OrderSide::Buy)
+                            .map(|order| {
+                                (order.creation_time as f64, order.price.to_f64().unwrap())
+                            })
+                            .collect();
+                        let dataset_buy_orders = Dataset::default()
+                            .data(&data_buy_orders)
+                            .marker(symbols::Marker::Dot)
+                            .style(Style::default().fg(tailwind::GREEN.c500))
+                            .graph_type(ratatui::widgets::GraphType::Bar);
+
+                        let data_sell_orders: Vec<(f64, f64)> = self
+                            .get_orders()
+                            .iter()
+                            .filter(|order| order.side == OrderSide::Sell)
+                            .map(|order| {
+                                (order.creation_time as f64, order.price.to_f64().unwrap())
+                            })
+                            .collect();
+                        let dataset_sell_orders = Dataset::default()
+                            .data(&data_sell_orders)
+                            .marker(symbols::Marker::Dot)
+                            .style(Style::default().fg(tailwind::RED.c500))
+                            .graph_type(ratatui::widgets::GraphType::Bar);
+
+                        let chart = Chart::new(vec![
+                            dataset_candles,
+                            dataset_buy_orders,
+                            dataset_sell_orders,
+                        ])
+                        .x_axis(
+                            Axis::default()
+                                .title("Time")
+                                .bounds([start, end])
+                                .labels([start_time, end_time]),
+                        )
+                        .y_axis(
+                            Axis::default()
+                                .title("Price")
+                                .bounds([min_close, max_close])
+                                .labels([
+                                    format!("{}", min_close),
+                                    format!("{}", last_close),
+                                    format!("{}", max_close),
+                                ]),
+                        )
+                        .block(block.clone());
 
                         frame.render_widget(chart, area);
                     }

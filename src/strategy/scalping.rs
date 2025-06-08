@@ -162,11 +162,11 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
 
         self.add_trade_event_history(event.clone()).await;
 
-        let sma = self.get_wsma(&event.ticker, 5).await;
-        let wsma = self.get_wsma(&event.ticker, 14).await;
+        let wsma_long = self.get_wsma(&event.ticker, 14).await;
+        let wsma_short = self.get_wsma(&event.ticker, 5).await;
 
-        let long_atr = self.get_atr(&event.ticker, 10).await;
-        let short_atr = self.get_atr(&event.ticker, 3).await;
+        let atr_long = self.get_atr(&event.ticker, 10).await;
+        let atr_short = self.get_atr(&event.ticker, 3).await;
 
         let state = self.state.read().await;
 
@@ -230,7 +230,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                             });
                         }
 
-                        match (sma, wsma) {
+                        match (wsma_short, wsma_long) {
                             (Some(sma), Some(wsma)) => {
                                 if sma > wsma && take_profit < self.target_profit * dec!(10) {
                                     let reason = format!("Upward trend : skipping sell.");
@@ -323,7 +323,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                                 let skip_condition = match time_since_sell {
                                     Some(time_since_sell) => {
                                         time_since_sell
-                                            > Duration::from_secs(1 * 60).as_millis() as u64
+                                            > Duration::from_secs(3600 * 8).as_millis() as u64
                                     }
                                     None => true,
                                 };
@@ -345,7 +345,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                                 }
 
                                 if !skip_condition {
-                                    match (sma, wsma) {
+                                    match (wsma_short, wsma_long) {
                                         (Some(sma), Some(wsma)) => {
                                             if sma < wsma {
                                                 let reason = format!("SMA < WSMA : skipping buy.");
@@ -375,7 +375,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                                         }
                                     }
 
-                                    match (short_atr, long_atr) {
+                                    match (atr_short, atr_long) {
                                         (Some(short_atr), Some(long_atr)) => {
                                             if short_atr < long_atr {
                                                 let reason = format!("Average true range lower than usual : skipping buy.");
@@ -430,7 +430,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                 //
                 // entry logic
                 //
-                match (wsma, sma) {
+                match (wsma_long, wsma_short) {
                     (Some(wsma), Some(sma)) => {
                         if wsma > event.price {
                             let reason = format!("SMA > price : skipping entry.");
@@ -452,7 +452,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                     _ => return Ok(StrategyAction::None),
                 }
 
-                match (short_atr, long_atr) {
+                match (atr_short, atr_long) {
                     (Some(short_atr), Some(long_atr)) => {
                         if short_atr < long_atr {
                             let reason =

@@ -90,12 +90,12 @@ impl State {
             })
     }
 
-    pub fn get_total_scalped(&self, quote_asset: String) -> Decimal {
+    pub fn get_total_scalped(&self, base_asset: String) -> Decimal {
         self.orders
             .iter()
             .filter(|order| {
                 matches!(order.side, OrderSide::Sell)
-                    && order.ticker.quote == quote_asset
+                    && order.ticker.base == base_asset
                     && matches!(order.status, OrderStatus::Executed)
             })
             .fold(dec!(0), |acc, order| {
