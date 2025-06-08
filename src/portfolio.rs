@@ -26,6 +26,7 @@ impl Portfolio {
         }
     }
 
+    // for stable iteration over assets
     pub fn next_prev_symbol(&self, cur: Option<String>, is_next: bool) -> Option<String> {
         let mut keys: Vec<&String> = self.assets.keys().collect();
         keys.sort();

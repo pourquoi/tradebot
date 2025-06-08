@@ -204,7 +204,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                             price: event.price,
                             marketplace_id: None,
                             filled_amount: dec!(0),
-                            parent_order_price: Some(last_order.1.price),
+                            parent_order_price: Some(last_order.1.get_trade_total_price()),
                             trades: Vec::new(),
                         };
                         let fees = self.marketplace.get_fees(&order).await;
@@ -299,7 +299,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                                     price: event.price,
                                     marketplace_id: None,
                                     filled_amount: dec!(0),
-                                    parent_order_price: Some(last_order.1.price),
+                                    parent_order_price: Some(last_order.1.get_trade_total_price()),
                                     trades: Vec::new(),
                                 };
                                 match self

@@ -5,7 +5,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    order::{Order, OrderStatus, OrderSide},
+    order::{Order, OrderSide, OrderStatus},
     portfolio::{self, Portfolio},
     ticker::Ticker,
 };
@@ -66,9 +66,7 @@ impl State {
                     && matches!(order.status, OrderStatus::Executed)
             })
             .min_by(|a, b| match (&a.1.working_time, &b.1.working_time) {
-                (Some(ts_a), Some(ts_b)) => {
-                    ts_a.cmp(ts_b)
-                }
+                (Some(ts_a), Some(ts_b)) => ts_a.cmp(ts_b),
                 _ => Ordering::Equal,
             })
     }
@@ -87,9 +85,7 @@ impl State {
                     && matches!(order.status, OrderStatus::Executed)
             })
             .max_by(|a, b| match (&a.1.working_time, &b.1.working_time) {
-                (Some(ts_a), Some(ts_b)) => {
-                    ts_a.cmp(ts_b)
-                }
+                (Some(ts_a), Some(ts_b)) => ts_a.cmp(ts_b),
                 _ => Ordering::Equal,
             })
     }
@@ -98,13 +94,14 @@ impl State {
         self.orders
             .iter()
             .filter(|order| {
-                matches!(order.side, OrderSide::Sell) && order.ticker.quote == quote_asset
+                matches!(order.side, OrderSide::Sell)
+                    && order.ticker.quote == quote_asset
+                    && matches!(order.status, OrderStatus::Executed)
             })
             .fold(dec!(0), |acc, order| {
                 if let Some(parent_order_price) = order.parent_order_price {
                     return acc
-                        + (order.price * order.amount * dec!(0.999)
-                            - parent_order_price * order.amount / dec!(0.999));
+                        + (order.get_trade_total_price() * dec!(0.999) - parent_order_price);
                 }
                 acc
             })

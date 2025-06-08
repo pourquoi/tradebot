@@ -1,4 +1,5 @@
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 use crate::ticker::Ticker;
@@ -154,5 +155,12 @@ pub struct Order {
 impl Order {
     pub fn get_last_trade_time(&self) -> Option<u64> {
         self.trades.iter().map(|trade| trade.trade_time).max()
+    }
+
+    pub fn get_trade_total_price(&self) -> Decimal {
+        self.trades
+            .iter()
+            .map(|trade| trade.amount * trade.price)
+            .sum::<Decimal>()
     }
 }

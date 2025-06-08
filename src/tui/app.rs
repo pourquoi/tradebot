@@ -26,7 +26,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::{
     marketplace::{CandleEvent, MarketPlaceEvent, TradeEvent},
-    order::{Order, OrderSide},
+    order::{Order, OrderSide, OrderTrade},
     portfolio::{Asset, Portfolio},
     state::StateEvent,
     strategy::StrategyEvent,
@@ -68,7 +68,7 @@ impl App {
             orders: Vec::new(),
             selected_asset: None,
             selected_window: Window::Portfolio,
-            order_table_state: TableState::default().with_selected(0),
+            order_table_state: TableState::default(),
             orders_scroll_state: ScrollbarState::new(0),
             orders_scroll: 0,
         }
@@ -145,6 +145,14 @@ impl App {
             match key.code {
                 KeyCode::Esc => match self.selected_window {
                     Window::None => self.should_quit = true,
+                    Window::Orders => match self.get_selected_order() {
+                        Some(order) => {
+                            self.order_table_state.select(None);
+                        }
+                        _ => {
+                            self.selected_window = Window::None;
+                        }
+                    },
                     _ => {
                         self.selected_asset = None;
                         self.selected_window = Window::None;
@@ -215,6 +223,25 @@ impl App {
         //    .with_offset(self.orders_scroll);
     }
 
+    fn get_orders(&self) -> Vec<&Order> {
+        self.orders
+            .iter()
+            .filter(|order| {
+                self.selected_asset
+                    .as_ref()
+                    .map(|selected_asset| &order.ticker.base == selected_asset)
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
+
+    fn get_selected_order(&self) -> Option<&Order> {
+        match (&self.selected_window, self.order_table_state.selected()) {
+            (Window::Orders, Some(pos)) => self.get_orders().get(pos).copied(),
+            _ => None,
+        }
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         let [header_area, main_area, footer_area] = Layout::vertical([
             Constraint::Length(2),
@@ -277,7 +304,14 @@ impl App {
     }
 
     fn render_detail(&mut self, frame: &mut Frame, area: Rect) {
-        self.render_orders(frame, area);
+        if let Some(order) = self.get_selected_order() {
+            let [right_area, left_area] =
+                Layout::horizontal([Constraint::Fill(1), Constraint::Max(40)]).areas(area);
+            self.render_orders(frame, right_area);
+            self.render_order_trades(frame, left_area);
+        } else {
+            self.render_orders(frame, area);
+        }
     }
 
     fn render_orders(&mut self, frame: &mut Frame, area: Rect) {
@@ -311,14 +345,8 @@ impl App {
         .height(1);
 
         let rows: Vec<Row> = self
-            .orders
-            .iter()
-            .filter(|order| {
-                self.selected_asset
-                    .as_ref()
-                    .map(|selected_asset| &order.ticker.base == selected_asset)
-                    .unwrap_or(true)
-            })
+            .get_orders()
+            .into_iter()
             .enumerate()
             .map(|(i, order)| {
                 Row::new([
@@ -388,6 +416,30 @@ impl App {
             }),
             &mut self.orders_scroll_state,
         );
+    }
+
+    fn render_order_trades(&self, frame: &mut Frame, area: Rect) {
+        if let Some(order) = self.get_selected_order() {
+            let total: Decimal = order
+                .trades
+                .iter()
+                .map(|trade| trade.amount * trade.price)
+                .sum();
+            let block = Block::default()
+                .title(format!("{} trades : $ {}", order.trades.len(), total))
+                .borders(Borders::ALL);
+
+            let mut assets: Vec<&String> = self.portfolio.assets.keys().collect();
+            assets.sort();
+
+            let items: Vec<ListItem> = order
+                .trades
+                .iter()
+                .map(|trade| ListItem::from(trade))
+                .collect();
+            let list = List::new(items).block(block);
+            frame.render_widget(list, area);
+        }
     }
 
     fn render_trades(&self, frame: &mut Frame, area: Rect) {
@@ -632,6 +684,21 @@ impl From<&Asset> for ListItem<'_> {
             ),
         ]);
         let bot_line = Line::from(vec![Span::raw(asset.amount.to_string())]);
+        ListItem::new(vec![top_line, bot_line])
+    }
+}
+
+impl From<&OrderTrade> for ListItem<'_> {
+    fn from(value: &OrderTrade) -> Self {
+        let top_line = Line::from(Span::styled(
+            format!("$ {}", value.amount * value.price),
+            Style::new().fg(Color::Yellow),
+        ));
+        let bot_line = Line::from(vec![
+            Span::raw(format!("{}", value.amount)),
+            Span::raw(" - "),
+            Span::raw(format!("{}", value.price)),
+        ]);
         ListItem::new(vec![top_line, bot_line])
     }
 }
