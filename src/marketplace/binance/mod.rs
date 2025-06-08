@@ -145,9 +145,11 @@ impl MarketPlaceData for Binance {
         &self,
         ticker: &Ticker,
         interval: &str,
+        from: Option<u64>,
+        to: Option<u64>,
     ) -> Result<Vec<super::CandleEvent>> {
         let candles = self
-            .get_candles(format!("{}", ticker).as_str(), interval)
+            .get_candles(format!("{}", ticker).as_str(), interval, from, to)
             .await?;
         Ok(candles
             .into_iter()

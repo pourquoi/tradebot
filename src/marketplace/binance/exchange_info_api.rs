@@ -95,6 +95,8 @@ impl Binance {
         )
         .unwrap();
 
+        info!("{}", url);
+
         let r = self.client.get(url).send().await?;
         let r = r.text().await.unwrap();
         let r: ExchangeInfo = serde_json::de::from_str(r.as_str()).unwrap();

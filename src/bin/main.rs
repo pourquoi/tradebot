@@ -244,7 +244,7 @@ async fn run_start(
 
         async move {
             let mut strategy = ScalpingStrategy::new(state.clone(), marketplace, tickers);
-            let _ = strategy.init().await;
+
             loop {
                 let event = rx.recv().await;
                 if let Ok(AppEvent::MarketPlace(event)) = event {
@@ -493,8 +493,8 @@ async fn run_replay(
     info!("{}", "STARTING REPLAY".green());
 
     tokio::select! {
-        _ = marketplace_task => {}
-        _ = server_task => {}
+        _ = marketplace_task => { info!("marketplace_task ended"); }
+        _ = server_task => { info!("server_task ended"); }
     }
 
     Ok(())

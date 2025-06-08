@@ -7,6 +7,7 @@ use serde::ser::SerializeSeq;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use tracing::info;
 
 use crate::marketplace::binance::{Binance, PUBLIC_MARKET_ENDPOINT};
 use crate::marketplace::CandleEvent;
@@ -126,13 +127,31 @@ impl Serialize for Candle {
 }
 
 impl Binance {
-    pub async fn get_candles(&self, symbol: &str, interval: &str) -> Result<Vec<Candle>> {
-        let params = [("symbol", symbol), ("interval", interval)];
+    pub async fn get_candles(
+        &self,
+        symbol: &str,
+        interval: &str,
+        from: Option<u64>,
+        to: Option<u64>,
+    ) -> Result<Vec<Candle>> {
+        let mut params = vec![
+            ("symbol", symbol.to_string()),
+            ("interval", interval.to_string()),
+        ];
+        if let Some(from) = from {
+            params.push(("startTime", from.to_string()));
+        }
+        if let Some(to) = to {
+            params.push(("endTime", to.to_string()));
+        }
         let url = Url::parse_with_params(
             format!("{PUBLIC_MARKET_ENDPOINT}/api/v3/klines").as_str(),
             &params,
         )
         .unwrap();
+
+        info!("{}", url);
+
         let r = self.client.get(url).send().await?;
         let r: Vec<Value> = r.json().await?;
         Ok(r.into_iter()

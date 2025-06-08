@@ -7,7 +7,7 @@ use hmac::{Hmac, Mac};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sha2::Sha256;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::{
     marketplace::binance::Binance,
@@ -103,6 +103,9 @@ impl Binance {
             "{}/api/v3/openOrders?{}&signature={}",
             ENDPOINT, params, signature
         );
+
+        info!("{}", url);
+
         let res = self
             .client
             .get(&url)
@@ -135,6 +138,8 @@ impl Binance {
             "{}/api/v3/order?{}&signature={}",
             ENDPOINT, params, signature
         );
+
+        info!("{}", url);
 
         let res = self
             .client

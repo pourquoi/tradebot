@@ -78,7 +78,11 @@ pub struct CandleEvent {
 pub trait MarketPlace {}
 
 pub trait MarketPlaceStream {
-    async fn start(&mut self, tickers: &Vec<Ticker>, tx: Sender<AppEvent>);
+    fn start(
+        &mut self,
+        tickers: &Vec<Ticker>,
+        tx: Sender<AppEvent>,
+    ) -> impl std::future::Future<Output = ()>;
 }
 
 pub trait MarketPlaceData {
@@ -86,22 +90,32 @@ pub trait MarketPlaceData {
         &self,
         ticker: &Ticker,
         interval: &str,
+        from: Option<u64>,
+        to: Option<u64>,
     ) -> impl std::future::Future<Output = Result<Vec<CandleEvent>>>;
 }
 
 pub trait MarketPlaceSettings {
-    // Get the fees for this order.
-    async fn get_fees(&self, order: &Order) -> Decimal;
+    // Get the fees ratio for this order.
+    fn get_fees(&self, order: &Order) -> impl std::future::Future<Output = Decimal>;
 
     // Adjust the price and amount rounding according the marketplace settings.
-    async fn adjust_order_price_and_amount(&self, order: &mut Order) -> Result<()>;
+    fn adjust_order_price_and_amount(
+        &self,
+        order: &mut Order,
+    ) -> impl std::future::Future<Output = Result<()>>;
 }
 
 pub trait MarketPlaceAccount {
-    async fn get_account_assets(&mut self) -> Result<HashMap<String, Asset>>;
+    fn get_account_assets(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<HashMap<String, Asset>>>;
 }
 
 pub trait MarketPlaceTrade {
-    async fn get_orders(&self, tickers: &Vec<Ticker>) -> Result<Vec<Order>>;
-    async fn place_order(&self, order: &Order) -> Result<Order>;
+    fn get_orders(
+        &self,
+        tickers: &Vec<Ticker>,
+    ) -> impl std::future::Future<Output = Result<Vec<Order>>>;
+    fn place_order(&self, order: &Order) -> impl std::future::Future<Output = Result<Order>>;
 }

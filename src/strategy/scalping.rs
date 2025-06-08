@@ -30,6 +30,7 @@ pub struct ScalpingStrategy<M> {
     target_profit: Decimal,
     quote_amount: Decimal,
     buy_cooldown: Duration,
+    initialiazed: bool,
 }
 
 impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M> {
@@ -41,16 +42,20 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
             tickers,
             trade_event_history,
             candle_event_history,
-            target_profit: dec!(1.),
+            target_profit: dec!(1.5),
             quote_amount: dec!(300),
             marketplace,
             buy_cooldown: Duration::from_secs(60),
+            initialiazed: false,
         }
     }
 
-    pub async fn init(&mut self) -> Result<()> {
+    async fn init(&mut self, start_time: u64) -> Result<()> {
         for ticker in self.tickers.iter() {
-            let candles = self.marketplace.get_candles(ticker, "1m").await?;
+            let candles = self
+                .marketplace
+                .get_candles(ticker, "1m", None, Some(start_time))
+                .await?;
             let mut history = self.candle_event_history.write().await;
             info!(
                 "Loaded {} candles for {}. Start={:?} End={:?}",
@@ -227,11 +232,8 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
 
                         match (sma, wsma) {
                             (Some(sma), Some(wsma)) => {
-                                if event.price > sma && take_profit < self.target_profit * dec!(5) {
-                                    let reason = format!(
-                                        "SMA {} > WSMA {} or price {} > SMA : skipping sell.",
-                                        sma, wsma, event.price
-                                    );
+                                if sma > wsma && take_profit < self.target_profit * dec!(10) {
+                                    let reason = format!("Upward trend : skipping sell.");
                                     return Ok(StrategyAction::Continue {
                                         ticker: event.ticker.clone(),
                                         stop_propagation: false,
@@ -321,7 +323,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                                 let skip_condition = match time_since_sell {
                                     Some(time_since_sell) => {
                                         time_since_sell
-                                            > Duration::from_secs(24 * 3600).as_millis() as u64
+                                            > Duration::from_secs(1 * 60).as_millis() as u64
                                     }
                                     None => true,
                                 };
@@ -507,8 +509,19 @@ where
         event: crate::marketplace::MarketPlaceEvent,
     ) -> Result<super::StrategyAction> {
         match event {
-            MarketPlaceEvent::Trade(event) => self.on_trade_event(&event).await,
+            MarketPlaceEvent::Trade(event) => {
+                if self.initialiazed {
+                    self.on_trade_event(&event).await
+                } else {
+                    Ok(StrategyAction::None)
+                }
+            }
             MarketPlaceEvent::Candle(event) => {
+                if !self.initialiazed {
+                    self.init(event.start_time).await.unwrap();
+                    self.initialiazed = true;
+                }
+
                 if !self.tickers.contains(&event.ticker) {
                     return Ok(StrategyAction::Continue {
                         ticker: event.ticker.clone(),

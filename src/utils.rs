@@ -9,6 +9,8 @@ use yata::{
 
 use rust_decimal::Decimal;
 
+// Simple Moving Average
+// prices: recent to older
 pub fn sma(prices: &[Decimal], period: usize) -> Option<Decimal> {
     if prices.len() >= period {
         Some(prices[0..period].iter().sum::<Decimal>() / Decimal::from(period as u32))
@@ -17,6 +19,8 @@ pub fn sma(prices: &[Decimal], period: usize) -> Option<Decimal> {
     }
 }
 
+// Wilder Smoothing Moving Average
+// prices: recent to older
 pub fn wsma(prices: &[Decimal], period: usize) -> Option<Decimal> {
     if period > 0 && prices.len() >= period {
         let first = prices[period - 1].to_f64()?;
@@ -31,6 +35,8 @@ pub fn wsma(prices: &[Decimal], period: usize) -> Option<Decimal> {
     }
 }
 
+// Average True Range
+// prices: recent to older
 pub fn atr(prices: &[(Decimal, Decimal, Decimal)], n: usize) -> Option<Decimal> {
     if prices.len() < n {
         return None;

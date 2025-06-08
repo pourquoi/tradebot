@@ -31,6 +31,7 @@ use crate::{
     state::StateEvent,
     strategy::StrategyEvent,
     ticker::Ticker,
+    utils::avg,
     AppEvent,
 };
 
@@ -114,17 +115,14 @@ impl App {
                 _ => {}
             },
             AppEvent::MarketPlace(MarketPlaceEvent::Candle(candle)) => {
-                let candles = self
-                    .candles
-                    .entry(candle.ticker.clone())
-                    .or_insert(VecDeque::with_capacity(300));
-                //if let Some(last) = candles.pop_back() {
-                //    if last.start_time != candle.start_time {
-                //        candles.push_back(last);
-                //    }
-                //}
+                let candles = self.candles.entry(candle.ticker.clone()).or_default();
+                if let Some(last) = candles.pop_back() {
+                    if last.start_time != candle.start_time {
+                        candles.push_back(last);
+                    }
+                }
                 candles.push_back(candle.clone());
-                if candles.len() >= 300 {
+                if candles.len() >= 3600 * 6 {
                     candles.pop_front();
                 }
             }
@@ -162,6 +160,7 @@ impl App {
                         self.orders_scroll = self.orders_scroll.saturating_sub(1);
                         self.orders_scroll_state =
                             self.orders_scroll_state.position(self.orders_scroll);
+                        self.order_table_state.select(Some(self.orders_scroll));
                     }
                     _ => {}
                 },
@@ -175,6 +174,7 @@ impl App {
                         self.orders_scroll = self.orders_scroll.saturating_add(1);
                         self.orders_scroll_state =
                             self.orders_scroll_state.position(self.orders_scroll);
+                        self.order_table_state.select(Some(self.orders_scroll));
                     }
                     _ => {}
                 },
@@ -209,6 +209,10 @@ impl App {
             self.orders_scroll = 0;
         }
         self.order_table_state.select(Some(self.orders_scroll));
+        //self.order_table_state = self
+        //    .order_table_state
+        //    .clone()
+        //    .with_offset(self.orders_scroll);
     }
 
     fn render(&mut self, frame: &mut Frame) {
@@ -442,7 +446,7 @@ impl App {
         }
     }
 
-    fn render_candles(&self, frame: &mut Frame, area: Rect) {
+    fn render_candles(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::default().title("Candles").borders(Borders::ALL);
 
         let mut error: Option<String> = None;
@@ -456,15 +460,24 @@ impl App {
                     .title(format!("{} candles", asset.symbol))
                     .borders(Borders::ALL);
                 let ticker = Ticker::new(asset.symbol.as_str(), "USDT");
-                if let Some(candles) = self.candles.get(&ticker) {
+                if let Some(candles) = self.candles.get_mut(&ticker) {
                     let data: Vec<(f64, f64)> = candles
-                        .iter()
-                        .enumerate()
-                        .map(|(i, candle)| {
-                            //(i as f64, i as f64)
+                        .make_contiguous()
+                        .windows(10)
+                        .map(|candles| {
                             (
-                                candle.close_time as f64,
-                                candle.close_price.to_f64().unwrap(),
+                                candles
+                                    .iter()
+                                    .map(|candle| candle.close_time)
+                                    .min()
+                                    .unwrap() as f64,
+                                avg(&candles
+                                    .iter()
+                                    .map(|candle| candle.close_price)
+                                    .collect::<Vec<Decimal>>())
+                                .unwrap()
+                                .to_f64()
+                                .unwrap(),
                             )
                         })
                         .collect();
@@ -477,6 +490,30 @@ impl App {
                         let min_close = data.iter().map(|d| d.1).reduce(f64::min).unwrap_or(0.);
                         let max_close = data.iter().map(|d| d.1).reduce(f64::max).unwrap_or(0.);
 
+                        let last_close = if data.len() > 0 {
+                            data[data.len() - 1].1
+                        } else {
+                            0.
+                        };
+
+                        let start_time = if data.len() > 0 {
+                            DateTime::from_timestamp_millis(data[0].0 as i64)
+                                .unwrap()
+                                .format("%d %H:%M")
+                                .to_string()
+                        } else {
+                            String::from("-")
+                        };
+
+                        let end_time = if data.len() > 0 {
+                            DateTime::from_timestamp_millis(data[data.len() - 1].0 as i64)
+                                .unwrap()
+                                .format("%d %H:%M")
+                                .to_string()
+                        } else {
+                            String::from("-")
+                        };
+
                         let dataset = Dataset::default()
                             .data(&data)
                             .marker(symbols::Marker::Dot)
@@ -484,12 +521,21 @@ impl App {
                             .graph_type(ratatui::widgets::GraphType::Line);
 
                         let chart = Chart::new(vec![dataset])
-                            .x_axis(Axis::default().title("Time").bounds([start, end]))
+                            .x_axis(
+                                Axis::default()
+                                    .title("Time")
+                                    .bounds([start, end])
+                                    .labels([start_time, end_time]),
+                            )
                             .y_axis(
                                 Axis::default()
                                     .title("Price")
                                     .bounds([min_close, max_close])
-                                    .labels([format!("{}", min_close), format!("{}", max_close)]),
+                                    .labels([
+                                        format!("{}", min_close),
+                                        format!("{}", last_close),
+                                        format!("{}", max_close),
+                                    ]),
                             )
                             .block(block.clone());
 
