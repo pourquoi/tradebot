@@ -1,8 +1,14 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{mpsc::Receiver, Arc},
+};
 
 use anyhow::Result;
 use axum::{
-    extract::{ws::WebSocket, State, WebSocketUpgrade},
+    extract::{
+        ws::{Message, WebSocket},
+        State, WebSocketUpgrade,
+    },
     response::IntoResponse,
     routing::any,
     Router,
@@ -10,15 +16,16 @@ use axum::{
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use tokio::{
     select,
-    sync::{broadcast::Sender, RwLock},
+    sync::{broadcast, mpsc, RwLock},
 };
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, trace};
 
-use crate::{state::StateEvent, AppEvent};
+use crate::{state::StateEvent, AppCommandEvent, AppEvent};
 
 struct ServerState {
-    app_tx: Sender<AppEvent>,
+    app_tx: broadcast::Sender<AppEvent>,
+    cmd_tx: mpsc::Sender<AppCommandEvent>,
     app_state: Arc<RwLock<crate::state::State>>,
 }
 
@@ -27,9 +34,14 @@ type SharedServerState = Arc<ServerState>;
 pub async fn start(
     address: String,
     app_state: Arc<RwLock<crate::state::State>>,
-    app_tx: Sender<AppEvent>,
+    app_tx: broadcast::Sender<AppEvent>,
+    cmd_tx: mpsc::Sender<AppCommandEvent>,
 ) -> Result<()> {
-    let state = Arc::from(ServerState { app_tx, app_state });
+    let state = Arc::from(ServerState {
+        app_tx,
+        cmd_tx,
+        app_state,
+    });
 
     let app = Router::new()
         .route("/ws", any(ws_handler))
@@ -91,8 +103,14 @@ async fn handle_socket(socket: WebSocket, state: SharedServerState) {
     });
 
     let mut recv_task = tokio::task::spawn(async move {
+        let cmd_tx = state.cmd_tx.clone();
         while let Some(Ok(msg)) = receiver.next().await {
             info!("Received websocket message : {:?}", msg);
+            if let Message::Text(msg) = msg {
+                if let Ok(cmd) = serde_json::de::from_str::<AppCommandEvent>(msg.as_str()) {
+                    let _ = cmd_tx.send(cmd).await;
+                }
+            }
         }
     });
 

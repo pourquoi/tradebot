@@ -19,3 +19,8 @@ pub enum AppEvent {
     Strategy(StrategyEvent),
     MarketPlace(MarketPlaceEvent),
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum AppCommandEvent {
+    Pause,
+}

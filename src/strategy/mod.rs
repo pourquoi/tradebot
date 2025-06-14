@@ -12,18 +12,24 @@ pub enum StrategyEvent {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum StrategyAction {
-    Order {
+    None,
+    PlaceOrder {
         order: Order,
+    },
+    Ignore {
+        ticker: Ticker,
+        reason: String,
+        details: Option<String>,
+    },
+    Break {
+        ticker: Ticker,
+        reason: String,
+        details: Option<String>,
     },
     Cancel {
         order_id: String,
         reason: String,
-    },
-    None,
-    Continue {
-        ticker: Ticker,
-        stop_propagation: bool,
-        reason: String,
+        details: Option<String>,
     },
 }
 
@@ -31,5 +37,5 @@ pub trait Strategy {
     fn on_marketplace_event(
         &mut self,
         event: MarketPlaceEvent,
-    ) -> impl std::future::Future<Output = Result<StrategyAction>>;
+    ) -> impl std::future::Future<Output = Result<Vec<StrategyAction>>>;
 }

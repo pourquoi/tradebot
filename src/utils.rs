@@ -1,5 +1,6 @@
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{collections::HashMap, usize};
 use yata::{
     core::{Method, PeriodType},
@@ -8,6 +9,8 @@ use yata::{
 };
 
 use rust_decimal::Decimal;
+
+use crate::marketplace::CandleEvent;
 
 // Simple Moving Average
 // prices: recent to older
@@ -89,6 +92,101 @@ pub fn percentiles(prices: &Vec<Decimal>) -> HashMap<u8, Decimal> {
         percentiles.insert(p as u8, prices[n as usize]);
     }
     percentiles
+}
+
+pub enum PriceClusterSide {
+    Support,
+    Resistance,
+}
+
+pub fn find_price_clusters(
+    prices: &[Decimal],
+    tolerance: Decimal,
+    side: PriceClusterSide,
+) -> Vec<Decimal> {
+    let mut raw_levels = vec![];
+
+    for i in 1..prices.len() - 1 {
+        let prev = &prices[i - 1];
+        let curr = &prices[i];
+        let next = &prices[i + 1];
+
+        match side {
+            PriceClusterSide::Support => {
+                if curr < prev && curr < next {
+                    raw_levels.push(curr);
+                }
+            }
+            PriceClusterSide::Resistance => {
+                if curr > prev && curr > next {
+                    raw_levels.push(curr);
+                }
+            }
+        }
+    }
+
+    let mut clustered_levels: Vec<Decimal> = vec![];
+
+    for level in raw_levels {
+        let mut found_cluster = false;
+
+        for cluster in &mut clustered_levels {
+            if (level - *cluster).abs() <= tolerance {
+                *cluster = (*cluster + level) / dec!(2.0);
+                found_cluster = true;
+                break;
+            }
+        }
+
+        if !found_cluster {
+            clustered_levels.push(*level);
+        }
+    }
+
+    match side {
+        PriceClusterSide::Support => {
+            clustered_levels.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        }
+        PriceClusterSide::Resistance => {
+            clustered_levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        }
+    }
+    clustered_levels
+}
+
+pub fn deserialize_decimal_pairs<'de, D>(
+    deserializer: D,
+) -> Result<Vec<(Decimal, Decimal)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw: Vec<[String; 2]> = Vec::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|arr| {
+            let v1 = arr[0]
+                .parse::<Decimal>()
+                .map_err(serde::de::Error::custom)?;
+            let v2 = arr[1]
+                .parse::<Decimal>()
+                .map_err(serde::de::Error::custom)?;
+            Ok((v1, v2))
+        })
+        .collect()
+}
+
+pub fn serialize_decimal_pairs<S>(
+    pairs: &Vec<(Decimal, Decimal)>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let formatted: Vec<[String; 2]> = pairs
+        .iter()
+        .map(|(price, qty)| [price.to_string(), qty.to_string()])
+        .collect();
+
+    formatted.serialize(serializer)
 }
 
 #[cfg(test)]

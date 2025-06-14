@@ -22,7 +22,7 @@ use std::{
     collections::{HashMap, VecDeque},
     time::Duration,
 };
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{self, Receiver};
 
 use crate::{
     marketplace::{CandleEvent, MarketPlaceEvent, TradeEvent},
@@ -32,7 +32,7 @@ use crate::{
     strategy::StrategyEvent,
     ticker::Ticker,
     utils::avg,
-    AppEvent,
+    AppCommandEvent, AppEvent,
 };
 
 enum Window {
@@ -43,10 +43,12 @@ enum Window {
 
 pub struct App {
     should_quit: bool,
+    quote: String,
     rx: Receiver<AppEvent>,
+    tx: mpsc::Sender<AppCommandEvent>,
     portfolio: Portfolio,
     orders: Vec<Order>,
-    last_strategy_events: HashMap<Ticker, String>,
+    last_strategy_events: HashMap<Ticker, HashMap<String, (u64, String)>>,
     candles: HashMap<Ticker, VecDeque<CandleEvent>>,
     trades: HashMap<Ticker, VecDeque<TradeEvent>>,
     selected_window: Window,
@@ -57,10 +59,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(rx: Receiver<AppEvent>) -> Self {
+    pub fn new(rx: Receiver<AppEvent>, tx: mpsc::Sender<AppCommandEvent>, quote: String) -> Self {
         Self {
             should_quit: false,
             rx,
+            tx,
+            quote,
             last_strategy_events: HashMap::new(),
             candles: HashMap::new(),
             trades: HashMap::new(),
@@ -86,7 +90,7 @@ impl App {
         while !self.should_quit {
             tokio::select! {
                 _ = interval.tick() => { terminal.draw(|frame| self.render(frame))?; },
-                Some(Ok(event)) = events.next() => self.handle_events(event),
+                Some(Ok(event)) = events.next() => self.handle_events(event).await,
                 Some(event) = self.rx.recv() =>
                     self.handle_app_events(event)
             }
@@ -105,12 +109,21 @@ impl App {
                 self.update_orders_scroll();
             }
             AppEvent::Strategy(StrategyEvent::Action(action)) => match action {
-                crate::strategy::StrategyAction::Continue {
+                crate::strategy::StrategyAction::Ignore {
                     ticker,
-                    stop_propagation,
                     reason,
+                    details,
                 } => {
-                    self.last_strategy_events.insert(ticker, reason);
+                    let entry = self.last_strategy_events.entry(ticker).or_default();
+                    entry
+                        .entry(reason)
+                        .and_modify(|e| {
+                            e.0 += 1;
+                            if let Some(details) = details.clone() {
+                                e.1 = details;
+                            }
+                        })
+                        .or_insert((0, details.unwrap_or(String::new())));
                 }
                 _ => {}
             },
@@ -122,7 +135,7 @@ impl App {
                     }
                 }
                 candles.push_back(candle.clone());
-                if candles.len() >= 3600 * 6 {
+                if candles.len() > 24 * 60 {
                     candles.pop_front();
                 }
             }
@@ -140,7 +153,7 @@ impl App {
         }
     }
 
-    fn handle_events(&mut self, event: Event) {
+    async fn handle_events(&mut self, event: Event) {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Esc => match self.selected_window {
@@ -193,6 +206,9 @@ impl App {
                 KeyCode::Char('2') => {
                     self.selected_window = Window::Orders;
                     self.update_orders_scroll();
+                }
+                KeyCode::Char('p') => {
+                    let _ = self.tx.send(AppCommandEvent::Pause).await;
                 }
                 _ => {}
             }
@@ -253,12 +269,8 @@ impl App {
         let [left_area, right_area] =
             Layout::horizontal([Constraint::Max(40), Constraint::Fill(1)]).areas(main_area);
 
-        let [top_left_area, middle_left_area, bottom_left_area] = Layout::vertical([
-            Constraint::Fill(1),
-            Constraint::Max(10),
-            Constraint::Max(10),
-        ])
-        .areas(left_area);
+        let [top_left_area, bottom_left_area] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(left_area);
 
         let [top_right_area, bottom_right_area] =
             Layout::vertical([Constraint::Percentage(60), Constraint::Fill(1)]).areas(right_area);
@@ -268,7 +280,7 @@ impl App {
         self.render_portfolio(frame, top_left_area);
 
         self.render_candles(frame, top_right_area);
-        self.render_trades(frame, middle_left_area);
+        //self.render_trades(frame, middle_left_area);
 
         self.render_strategy_log(frame, bottom_left_area);
 
@@ -277,7 +289,10 @@ impl App {
 
     fn render_portfolio(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
-            .title("(1) Portfolio")
+            .title(format!(
+                "(1) Portfolio $ {}",
+                self.portfolio.value.unwrap_or(dec!(0)).round_dp(2)
+            ))
             .borders(Borders::ALL)
             .border_style(match self.selected_window {
                 Window::Portfolio => tailwind::BLUE.c500,
@@ -351,7 +366,7 @@ impl App {
             .enumerate()
             .map(|(i, order)| {
                 Row::new([
-                    Cell::from(format!("{}", i)),
+                    Cell::from(format!("{}", order.session_id.clone().unwrap_or_default())),
                     Cell::from(
                         match order
                             .working_time
@@ -456,7 +471,7 @@ impl App {
                 let block = Block::default()
                     .title(format!("{} trades", asset.symbol))
                     .borders(Borders::ALL);
-                let ticker = Ticker::new(asset.symbol.as_str(), "USDT");
+                let ticker = Ticker::new(asset.symbol.as_str(), &self.quote);
                 if let Some(trades) = self.trades.get(&ticker) {
                     let data: Vec<Option<u64>> = trades
                         .iter()
@@ -512,7 +527,7 @@ impl App {
                 let block = Block::default()
                     .title(format!("{} candles", asset.symbol))
                     .borders(Borders::ALL);
-                let ticker = Ticker::new(asset.symbol.as_str(), "USDT");
+                let ticker = Ticker::new(asset.symbol.as_str(), &self.quote);
                 if let Some(candles) = self.candles.get_mut(&ticker) {
                     let data_candles: Vec<(f64, f64)> = candles
                         .make_contiguous()
@@ -522,7 +537,7 @@ impl App {
                                 candles
                                     .iter()
                                     .map(|candle| candle.close_time)
-                                    .min()
+                                    .max()
                                     .unwrap() as f64,
                                 avg(&candles
                                     .iter()
@@ -587,7 +602,7 @@ impl App {
 
                         let dataset_candles = Dataset::default()
                             .data(&data_candles)
-                            .marker(symbols::Marker::Dot)
+                            .marker(symbols::Marker::Braille)
                             .style(Style::default().fg(tailwind::WHITE))
                             .graph_type(ratatui::widgets::GraphType::Line);
 
@@ -603,7 +618,7 @@ impl App {
                             .data(&data_buy_orders)
                             .marker(symbols::Marker::Dot)
                             .style(Style::default().fg(tailwind::GREEN.c500))
-                            .graph_type(ratatui::widgets::GraphType::Bar);
+                            .graph_type(ratatui::widgets::GraphType::Scatter);
 
                         let data_sell_orders: Vec<(f64, f64)> = self
                             .get_orders()
@@ -617,7 +632,7 @@ impl App {
                             .data(&data_sell_orders)
                             .marker(symbols::Marker::Dot)
                             .style(Style::default().fg(tailwind::RED.c500))
-                            .graph_type(ratatui::widgets::GraphType::Bar);
+                            .graph_type(ratatui::widgets::GraphType::Scatter);
 
                         let chart = Chart::new(vec![
                             dataset_candles,
@@ -668,16 +683,21 @@ impl App {
             .and_then(|k| self.portfolio.assets.get(&k))
         {
             Some(asset) => {
-                let ticker = Ticker::new(asset.symbol.as_str(), "USDT");
+                let ticker = Ticker::new(asset.symbol.as_str(), &self.quote);
                 match self.last_strategy_events.get(&ticker) {
-                    Some(event) => {
+                    Some(events) => {
                         let block = Block::default()
                             .title(format!("{} strategy", ticker.base))
                             .borders(Borders::ALL);
-                        let p = Paragraph::new(Text::raw(event.clone()))
-                            .wrap(Wrap { trim: true })
-                            .block(block);
-                        frame.render_widget(p, area);
+                        let mut items: Vec<ListItem> = vec![];
+                        for (reason, (count, details)) in events.iter() {
+                            items.push(ListItem::from(vec![
+                                Line::from(format!("{} ({})", reason, count)),
+                                Line::from(format!("{}", details)),
+                            ]));
+                        }
+                        let list = List::new(items).block(block);
+                        frame.render_widget(list, area);
                     }
                     None => {
                         error = Some(format!("No events yet"));
@@ -705,12 +725,12 @@ impl App {
         let block = Block::default().borders(Borders::ALL);
         let keys = match self.selected_window {
             Window::Portfolio => {
-                "(Esc) back | (1) Portfolio | (2) Orders | (↑) previous asset | (↓) next asset"
+                "(Esc) back | (p) Pause/Resume | (1) Portfolio | (2) Orders | (↑) previous asset | (↓) next asset"
             }
             Window::Orders => {
-                "(Esc) back | (1) Portfolio | (2) Orders | (↑) previous order | (↓) next order"
+                "(Esc) back | (p) Pause/Resume | (1) Portfolio | (2) Orders | (↑) previous order | (↓) next order"
             }
-            Window::None => "(Esc) quit | (1) Portfolio | (2) Orders",
+            Window::None => "(Esc) quit | (p) Pause/Resume | (1) Portfolio | (2) Orders",
         };
 
         let keys = Paragraph::new(Text::from(keys)).block(block);

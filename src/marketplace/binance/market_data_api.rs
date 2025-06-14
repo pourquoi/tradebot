@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tracing::info;
 
-use crate::marketplace::binance::{Binance, PUBLIC_MARKET_ENDPOINT};
+use crate::marketplace::binance::{Binance, ENDPOINT, PUBLIC_MARKET_ENDPOINT};
 use crate::marketplace::CandleEvent;
 use crate::ticker::Ticker;
 
@@ -126,6 +126,25 @@ impl Serialize for Candle {
     }
 }
 
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct Depth {
+    #[serde(rename = "lastUpdateId")]
+    last_update_id: u64,
+
+    #[serde(
+        deserialize_with = "crate::utils::deserialize_decimal_pairs",
+        serialize_with = "crate::utils::serialize_decimal_pairs"
+    )]
+    bids: Vec<(Decimal, Decimal)>,
+
+    #[serde(
+        deserialize_with = "crate::utils::deserialize_decimal_pairs",
+        serialize_with = "crate::utils::serialize_decimal_pairs"
+    )]
+    asks: Vec<(Decimal, Decimal)>,
+}
+
 impl Binance {
     pub async fn get_candles(
         &self,
@@ -157,6 +176,14 @@ impl Binance {
         Ok(r.into_iter()
             .flat_map(|v| v.try_into())
             .collect::<Vec<Candle>>())
+    }
+
+    pub async fn get_depth(&self, ticker: &Ticker) -> Result<Depth> {
+        let url = format!("{ENDPOINT}/api/v3/depth?symbol={}", ticker);
+        info!("{}", url);
+        let r = self.client.get(url).send().await?;
+        let depth: Depth = r.json().await?;
+        Ok(depth)
     }
 }
 

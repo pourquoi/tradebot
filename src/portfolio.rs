@@ -1,6 +1,8 @@
+use anyhow::{anyhow, Result};
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Display};
+use tracing::info;
 
 use colored::Colorize;
 use rust_decimal::Decimal;
@@ -9,6 +11,7 @@ use rust_decimal::Decimal;
 pub struct Asset {
     pub symbol: String,
     pub amount: Decimal,
+    pub locked: Decimal,
     pub value: Option<Decimal>,
 }
 
@@ -23,6 +26,32 @@ impl Portfolio {
         Self {
             assets: HashMap::new(),
             value: None,
+        }
+    }
+
+    pub fn check_funds(&self, asset: &String, required_amount: Decimal) -> bool {
+        match self.assets.get(asset) {
+            Some(asset) => asset.amount >= required_amount,
+            None => false,
+        }
+    }
+
+    pub fn reserve_funds(&mut self, asset: &String, amount: Decimal) -> Result<()> {
+        match self.assets.get_mut(asset) {
+            Some(asset) => {
+                if asset.amount < amount {
+                    return Err(anyhow!(
+                        "Missing {} for {}",
+                        amount - asset.amount,
+                        asset.symbol
+                    ));
+                }
+                asset.amount -= amount;
+                asset.locked += amount;
+                info!(" RESERVED {} {}", amount, asset.symbol);
+                Ok(())
+            }
+            None => Err(anyhow!("Asset {} not in portfolio", asset)),
         }
     }
 
@@ -56,12 +85,30 @@ impl Portfolio {
             .entry(symbol.clone())
             .and_modify(|asset| {
                 asset.amount += delta;
-                asset.value = Some(asset.amount * current_price);
+                asset.value = Some((asset.amount + asset.locked) * current_price);
             })
             .or_insert(Asset {
                 symbol: symbol.clone(),
                 amount: delta,
+                locked: dec!(0),
                 value: Some(delta * current_price),
+            });
+
+        self.update_value();
+    }
+
+    pub fn drain_asset_locked(&mut self, symbol: &String, drain: Decimal, current_price: Decimal) {
+        self.assets
+            .entry(symbol.clone())
+            .and_modify(|asset| {
+                asset.locked -= drain;
+                asset.value = Some((asset.amount + asset.locked) * current_price);
+            })
+            .or_insert(Asset {
+                symbol: symbol.clone(),
+                amount: -drain,
+                locked: dec!(0),
+                value: Some(-drain * current_price),
             });
 
         self.update_value();
@@ -82,9 +129,10 @@ impl Display for Portfolio {
         let mut s = vec![];
         for (_, asset) in self.assets.iter() {
             s.push(format!(
-                "{}: {} (~total {}, unit {})",
-                asset.symbol,
+                "{}: amount={} locked={} total=${} unit price=${})",
+                asset.symbol.blue(),
                 asset.amount.to_string().purple(),
+                asset.locked.to_string().purple(),
                 asset.value.unwrap_or(dec!(0)),
                 if asset.amount != dec!(0) {
                     asset.value.unwrap_or(dec!(0)) / asset.amount
@@ -95,7 +143,7 @@ impl Display for Portfolio {
         }
         write!(
             f,
-            "~{} :\n{}",
+            "\n---\n${}\n{}\n---",
             self.value
                 .map_or("?".to_string(), |v| v.to_string())
                 .yellow(),

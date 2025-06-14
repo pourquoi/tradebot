@@ -15,6 +15,8 @@ pub enum MarketPlaceEvent {
     Trade(TradeEvent),
     #[serde(rename = "C")]
     Candle(CandleEvent),
+    #[serde(rename = "D")]
+    Depth(DepthEvent),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -75,6 +77,44 @@ pub struct CandleEvent {
     pub closed: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DepthEvent {
+    #[serde(rename = "s")]
+    pub ticker: Ticker,
+
+    #[serde(rename = "U")]
+    pub first_update_id: u64,
+
+    #[serde(rename = "u")]
+    pub final_update_id: u64,
+
+    #[serde(rename = "T")]
+    pub time: u64,
+
+    #[serde(
+        rename = "a",
+        deserialize_with = "crate::utils::deserialize_decimal_pairs",
+        serialize_with = "crate::utils::serialize_decimal_pairs"
+    )]
+    pub asks: Vec<(Decimal, Decimal)>,
+
+    #[serde(
+        rename = "b",
+        deserialize_with = "crate::utils::deserialize_decimal_pairs",
+        serialize_with = "crate::utils::serialize_decimal_pairs"
+    )]
+    pub bids: Vec<(Decimal, Decimal)>,
+}
+
+impl DepthEvent {
+    pub fn buy_price(&self) -> Option<Decimal> {
+        self.bids.first().map(|(price, _)| *price)
+    }
+    pub fn sell_price(&self) -> Option<Decimal> {
+        self.asks.first().map(|(price, _)| *price)
+    }
+}
+
 pub trait MarketPlace {}
 
 pub trait MarketPlaceStream {
@@ -97,7 +137,7 @@ pub trait MarketPlaceData {
 
 pub trait MarketPlaceSettings {
     // Get the fees ratio for this order.
-    fn get_fees(&self, order: &Order) -> impl std::future::Future<Output = Decimal>;
+    fn get_fees(&self) -> impl std::future::Future<Output = Decimal>;
 
     // Adjust the price and amount rounding according the marketplace settings.
     fn adjust_order_price_and_amount(

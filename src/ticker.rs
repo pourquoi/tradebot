@@ -24,12 +24,12 @@ impl TryFrom<&str> for Ticker {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value.len() {
             6 => Ok(Self {
-                base: value[0..=2].to_string(),
-                quote: value[3..=5].to_string(),
+                base: value[0..=2].to_string().to_uppercase(),
+                quote: value[3..=5].to_string().to_uppercase(),
             }),
             7 => Ok(Self {
-                base: value[0..=2].to_string(),
-                quote: value[3..=6].to_string(),
+                base: value[0..=2].to_string().to_uppercase(),
+                quote: value[3..=6].to_string().to_uppercase(),
             }),
             other => Err(format!("Could not convert {} to ticker", other)),
         }
@@ -68,5 +68,11 @@ mod tests {
         let ticker = ticker.unwrap();
         assert_eq!(ticker.base, String::from("BTC"));
         assert_eq!(ticker.quote, String::from("USDT"));
+
+        let ticker = Ticker::try_from("ETHBTC");
+        assert!(ticker.is_ok());
+        let ticker = ticker.unwrap();
+        assert_eq!(ticker.base, String::from("ETH"));
+        assert_eq!(ticker.quote, String::from("BTC"));
     }
 }

@@ -16,6 +16,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
+use tracing::error;
 
 use super::MarketPlaceSettings;
 use super::MarketPlaceStream;
@@ -54,7 +55,9 @@ impl Binance {
             let res = self.get_exchange_info(tickers).await?;
             Some(res)
         };
-        let _ = self.get_account_overview(true).await?;
+        if self.get_account_overview(true).await.is_err() {
+            error!("Could not get binance account overview. Using hardcoded fees.")
+        }
         Ok(())
     }
 }
@@ -63,12 +66,12 @@ impl crate::marketplace::MarketPlace for Binance {}
 
 impl MarketPlaceStream for Binance {
     async fn start(&mut self, tickers: &Vec<Ticker>, tx: Sender<AppEvent>) {
-        self.listen_trade_stream(&tickers, tx).await;
+        self.connect_stream(&tickers, tx).await;
     }
 }
 
 impl MarketPlaceSettings for Binance {
-    async fn get_fees(&self, _order: &Order) -> Decimal {
+    async fn get_fees(&self) -> Decimal {
         let account = self.account_overview.read().await;
         let account = account.as_ref();
         match account {
@@ -171,6 +174,7 @@ impl MarketPlaceAccount for Binance {
                     Asset {
                         symbol: balance.asset.clone(),
                         amount: balance.free,
+                        locked: balance.locked,
                         value: None,
                     },
                 )

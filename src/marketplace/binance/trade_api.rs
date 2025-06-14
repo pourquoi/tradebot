@@ -8,7 +8,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 use sha2::Sha256;
 use tracing::{debug, info};
-
+use uuid::Uuid;
 use crate::{
     marketplace::binance::Binance,
     order::{Order, OrderSide, OrderStatus, OrderType},
@@ -60,6 +60,7 @@ impl TryFrom<&OrderResponse> for Order {
 
     fn try_from(value: &OrderResponse) -> std::result::Result<Self, Self::Error> {
         let order = Order {
+            id: Uuid::new_v4().to_string(),
             creation_time: value.transact_time,
             sent_time: Some(value.transact_time),
             working_time: value.working_time,
@@ -71,8 +72,12 @@ impl TryFrom<&OrderResponse> for Order {
             amount: value.orig_qty,
             filled_amount: value.executed_qty,
             trades: Vec::new(),
-            parent_order_price: None,
+            buy_order_price: None,
+            sell_order_price: None,
             marketplace_id: Some(format!("{}", value.order_id)),
+            session_id: None,
+            next_order_id: None,
+            prev_order_id: None
         };
 
         Ok(order)

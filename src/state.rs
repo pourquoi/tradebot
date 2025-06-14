@@ -1,5 +1,7 @@
-use std::{cmp::Ordering, collections::VecDeque, usize};
+use std::{cmp::Ordering, time::Duration, usize};
 
+use chrono::Utc;
+use itertools::Itertools;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -30,26 +32,89 @@ impl State {
         }
     }
 
+    pub fn find_by_id(&mut self, id: &String) -> Option<&mut Order> {
+        self.orders.iter_mut().find(|o| o.id == *id)
+    }
+
     pub fn add_order(&mut self, order: Order) -> Result<Order, String> {
         if order.status != OrderStatus::Draft {
             return Err(format!("Order is not a draft"));
         }
 
-        let enough_funds = match order.side {
-            OrderSide::Buy => match self.portfolio.assets.get(&order.ticker.quote) {
-                Some(asset) => asset.amount >= order.price * order.amount,
-                None => false,
+        if !self.portfolio.check_funds(
+            match order.side {
+                OrderSide::Sell => &order.ticker.base,
+                OrderSide::Buy => &order.ticker.quote,
             },
-            OrderSide::Sell => true,
+            match order.side {
+                OrderSide::Sell => order.amount,
+                OrderSide::Buy => order.amount * order.price,
+            },
+        ) {
+            return Err(format!("Not enough funds in portfolio"));
         };
 
-        if !enough_funds {
-            return Err(format!("Not enough funds in portfolio"));
+        if let Some(prev_order_id) = &order.prev_order_id {
+            if let Some(prev_order) = self.find_by_id(&prev_order_id) {
+                prev_order.next_order_id = Some(order.id.clone());
+            }
         }
 
         self.orders.push(order.clone());
 
         Ok(order)
+    }
+
+    // remove non active orders older than 2 weeks
+    pub fn purge_orders(&mut self, current_time: u64) -> usize {
+        let prev_count = self.orders.len();
+        self.orders = self
+            .orders
+            .iter()
+            .cloned()
+            .filter(|order| {
+                !matches!(order.status, OrderStatus::Active)
+                    || Duration::from_millis(current_time.saturating_sub(order.creation_time))
+                        > Duration::from_secs(3600 * 24 * 14)
+            })
+            .collect();
+        prev_count - self.orders.len()
+    }
+
+    pub fn get_active_sessions(&self, current_time: u64, session_lifetime: &Duration) -> usize {
+        let mut sessions: Vec<String> = self
+            .orders
+            .iter()
+            .filter(|order| {
+                Duration::from_millis(current_time.saturating_sub(order.creation_time))
+                    < *session_lifetime
+            })
+            .flat_map(|order| order.session_id.clone())
+            .collect();
+        sessions.sort();
+        sessions.into_iter().dedup().count()
+    }
+
+    pub fn get_session_profit(&self, session_id: &String) -> Decimal {
+        self.orders
+            .iter()
+            .filter(|order| {
+                order.session_id.as_ref() == Some(session_id)
+                    && matches!(order.status, OrderStatus::Executed)
+            })
+            .map(|order| match order.side {
+                OrderSide::Buy => -order.get_trade_total_price(),
+                OrderSide::Sell => order.get_trade_total_price(),
+            })
+            .sum()
+    }
+
+    pub fn get_session_start(&self, session_id: &String) -> Option<u64> {
+        self.orders
+            .iter()
+            .filter(|order| order.session_id.as_ref() == Some(session_id))
+            .map(|order| order.creation_time)
+            .min()
     }
 
     pub fn get_first_executed_order(
@@ -99,7 +164,7 @@ impl State {
                     && matches!(order.status, OrderStatus::Executed)
             })
             .fold(dec!(0), |acc, order| {
-                if let Some(parent_order_price) = order.parent_order_price {
+                if let Some(parent_order_price) = order.buy_order_price {
                     return acc
                         + (order.get_trade_total_price() * dec!(0.999) - parent_order_price);
                 }

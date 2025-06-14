@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use chrono::Utc;
 use futures::SinkExt;
 use futures_util::StreamExt;
 use rust_decimal::Decimal;
@@ -13,6 +14,7 @@ use tracing::info;
 use tungstenite::Message;
 
 use crate::marketplace::CandleEvent;
+use crate::marketplace::DepthEvent;
 use crate::marketplace::MarketPlaceEvent;
 use crate::marketplace::TradeEvent;
 use crate::ticker::Ticker;
@@ -130,8 +132,59 @@ pub struct TradeStream {
     pub maker_maker: bool,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct PartialDepthStream {
+    #[serde(rename = "lastUpdateId")]
+    last_update_id: u64,
+
+    #[serde(
+        deserialize_with = "crate::utils::deserialize_decimal_pairs",
+        serialize_with = "crate::utils::serialize_decimal_pairs"
+    )]
+    bids: Vec<(Decimal, Decimal)>,
+
+    #[serde(
+        deserialize_with = "crate::utils::deserialize_decimal_pairs",
+        serialize_with = "crate::utils::serialize_decimal_pairs"
+    )]
+    asks: Vec<(Decimal, Decimal)>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct DepthUpdateStream {
+    #[serde(rename = "e")]
+    pub event_type: String,
+
+    #[serde(rename = "E")]
+    pub event_time: u64,
+
+    #[serde(rename = "s")]
+    pub symbol: String,
+
+    #[serde(rename = "U")]
+    pub first_update_id: u64,
+
+    #[serde(rename = "u")]
+    pub final_update_id: u64,
+
+    #[serde(
+        rename = "b",
+        deserialize_with = "crate::utils::deserialize_decimal_pairs",
+        serialize_with = "crate::utils::serialize_decimal_pairs"
+    )]
+    pub bids: Vec<(Decimal, Decimal)>,
+
+    #[serde(
+        rename = "a",
+        deserialize_with = "crate::utils::deserialize_decimal_pairs",
+        serialize_with = "crate::utils::serialize_decimal_pairs"
+    )]
+    pub asks: Vec<(Decimal, Decimal)>,
+}
+
 impl Binance {
-    pub async fn listen_trade_stream(&self, tickers: &Vec<Ticker>, tx: Sender<AppEvent>) {
+    pub async fn connect_stream(&self, tickers: &Vec<Ticker>, tx: Sender<AppEvent>) {
         let trade_params = tickers
             .iter()
             .map(|s| format!("{}{}@trade", s.base.to_lowercase(), s.quote.to_lowercase()))
@@ -150,9 +203,22 @@ impl Binance {
             .collect::<Vec<String>>()
             .join("/");
 
+        let depth_params = tickers
+            .iter()
+            .map(|s| {
+                format!(
+                    "{}{}@depth{}",
+                    s.base.to_lowercase(),
+                    s.quote.to_lowercase(),
+                    5
+                )
+            })
+            .collect::<Vec<String>>()
+            .join("/");
+
         let request = format!(
             "wss://stream.binance.com/stream?streams={}/{}",
-            trade_params, candle_params
+            candle_params, depth_params
         );
         info!("Connecting to market data stream {request}");
 
@@ -185,92 +251,164 @@ impl Binance {
                 match tokio::time::timeout(Duration::from_secs(60), ws_stream.next()).await {
                     Ok(Some(message)) => match message {
                         Ok(Message::Text(message)) => {
+                            debug!("{:?}", message);
                             match serde_json::de::from_slice::<Value>(message.as_ref()) {
-                                Ok(value) => match value.get("data") {
-                                    Some(value) => match value.get("e") {
-                                        Some(Value::String(e)) if *e == "trade".to_string() => {
-                                            match serde_json::from_value::<TradeStream>(
-                                                value.clone(),
-                                            ) {
-                                                Ok(trade) => {
-                                                    match Ticker::try_from(&trade.symbol) {
-                                                        Ok(ticker) => {
-                                                            let _ = tx.send(AppEvent::MarketPlace(
-                                                                MarketPlaceEvent::Trade(
-                                                                    TradeEvent {
-                                                                        ticker,
-                                                                        price: trade.price,
-                                                                        quantity: trade.quantity,
-                                                                        trade_id: trade.trade_id,
-                                                                        trade_time: trade
-                                                                            .trade_time,
-                                                                    },
-                                                                ),
-                                                            ));
+                                Ok(value) => match (value.get("data"), value.get("stream")) {
+                                    (Some(value), Some(Value::String(stream))) => {
+                                        match value.get("e") {
+                                            Some(Value::String(e)) if *e == "trade".to_string() => {
+                                                match serde_json::from_value::<TradeStream>(
+                                                    value.clone(),
+                                                ) {
+                                                    Ok(trade) => {
+                                                        match Ticker::try_from(&trade.symbol) {
+                                                            Ok(ticker) => {
+                                                                let _ =
+                                                                    tx.send(AppEvent::MarketPlace(
+                                                                        MarketPlaceEvent::Trade(
+                                                                            TradeEvent {
+                                                                                ticker,
+                                                                                price: trade.price,
+                                                                                quantity: trade
+                                                                                    .quantity,
+                                                                                trade_id: trade
+                                                                                    .trade_id,
+                                                                                trade_time: trade
+                                                                                    .trade_time,
+                                                                            },
+                                                                        ),
+                                                                    ));
+                                                            }
+                                                            Err(..) => {
+                                                                error!("Stream parsing error : failed to parse ticker {}", trade.symbol);
+                                                            }
                                                         }
-                                                        Err(..) => {
-                                                            error!("Stream parsing error : failed to parse ticker {}", trade.symbol);
+                                                    }
+                                                    Err(err) => {
+                                                        error!("Stream parsing error : {}", err);
+                                                    }
+                                                }
+                                            }
+                                            Some(Value::String(e)) if *e == "kline".to_string() => {
+                                                match serde_json::from_value::<KLineStream>(
+                                                    value.clone(),
+                                                ) {
+                                                    Ok(candle) => {
+                                                        match Ticker::try_from(&candle.symbol) {
+                                                            Ok(ticker) => {
+                                                                let _ =
+                                                                    tx.send(AppEvent::MarketPlace(
+                                                                        MarketPlaceEvent::Candle(
+                                                                            CandleEvent {
+                                                                                ticker,
+                                                                                high_price: candle
+                                                                                    .data
+                                                                                    .high_price,
+                                                                                low_price: candle
+                                                                                    .data
+                                                                                    .low_price,
+                                                                                start_time: candle
+                                                                                    .data
+                                                                                    .start_time,
+                                                                                close_time: candle
+                                                                                    .data
+                                                                                    .close_time,
+                                                                                trade_count: candle
+                                                                                    .data
+                                                                                    .trade_count,
+                                                                                volume: candle
+                                                                                    .data
+                                                                                    .volume,
+                                                                                closed: candle
+                                                                                    .data
+                                                                                    .closed,
+                                                                                open_price: candle
+                                                                                    .data
+                                                                                    .open_price,
+                                                                                close_price: candle
+                                                                                    .data
+                                                                                    .close_price,
+                                                                            },
+                                                                        ),
+                                                                    ));
+                                                            }
+                                                            Err(..) => {
+                                                                error!("Stream parsing error : failed to parse ticker {}", candle.symbol);
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        error!("Stream parsing error : {}", err);
+                                                    }
+                                                }
+                                            }
+                                            Some(Value::String(e))
+                                                if *e == "depthUpdate".to_string() =>
+                                            {
+                                                match serde_json::from_value::<DepthUpdateStream>(
+                                                    value.clone(),
+                                                ) {
+                                                    Ok(depth) => {
+                                                        match Ticker::try_from(&depth.symbol) {
+                                                            Ok(ticker) => {
+                                                                let _ = tx.send(AppEvent::MarketPlace(
+                                                                    MarketPlaceEvent::Depth(DepthEvent {
+                                                                        ticker,
+                                                                        first_update_id: depth.first_update_id,
+                                                                        final_update_id: depth.final_update_id,
+                                                                        asks: depth.asks,
+                                                                        bids: depth.bids,
+                                                                        time: Utc::now().timestamp_millis()
+                                                                        as u64,
+                                                                    }),
+                                                                ));
+                                                            }
+                                                            Err(..) => {
+                                                                error!("Stream parsing error : failed to parse ticker {}", depth.symbol);
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        error!("Stream parsing error : {}", err);
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                if stream.contains("depth") {
+                                                    if let Some(ticker) =
+                                                        extract_ticker_from_stream(stream)
+                                                    {
+                                                        match serde_json::from_value::<
+                                                            PartialDepthStream,
+                                                        >(
+                                                            value.clone()
+                                                        ) {
+                                                            Ok(depth) => {
+                                                                let _ = tx.send(AppEvent::MarketPlace(
+                                                                    MarketPlaceEvent::Depth(DepthEvent {
+                                                                        ticker: ticker.clone(),
+                                                                        first_update_id: 0,
+                                                                        final_update_id: depth.last_update_id,
+                                                                        asks: depth.asks,
+                                                                        bids: depth.bids,
+                                                                        time: Utc::now().timestamp_millis()
+                                                                        as u64,
+                                                                    }),
+                                                                ));
+                                                            }
+                                                            Err(err) => {
+                                                                error!(
+                                                                    "Stream parsing error : {}",
+                                                                    err
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                 }
-                                                Err(err) => {
-                                                    error!("Stream parsing error : {}", err);
-                                                }
                                             }
                                         }
-                                        Some(Value::String(e)) if *e == "kline".to_string() => {
-                                            match serde_json::from_value::<KLineStream>(
-                                                value.clone(),
-                                            ) {
-                                                Ok(candle) => {
-                                                    match Ticker::try_from(&candle.symbol) {
-                                                        Ok(ticker) => {
-                                                            let _ = tx.send(AppEvent::MarketPlace(
-                                                                MarketPlaceEvent::Candle(
-                                                                    CandleEvent {
-                                                                        ticker,
-                                                                        high_price: candle
-                                                                            .data
-                                                                            .high_price,
-                                                                        low_price: candle
-                                                                            .data
-                                                                            .low_price,
-                                                                        start_time: candle
-                                                                            .data
-                                                                            .start_time,
-                                                                        close_time: candle
-                                                                            .data
-                                                                            .close_time,
-                                                                        trade_count: candle
-                                                                            .data
-                                                                            .trade_count,
-                                                                        volume: candle.data.volume,
-                                                                        closed: candle.data.closed,
-                                                                        open_price: candle
-                                                                            .data
-                                                                            .open_price,
-                                                                        close_price: candle
-                                                                            .data
-                                                                            .close_price,
-                                                                    },
-                                                                ),
-                                                            ));
-                                                        }
-                                                        Err(..) => {
-                                                            error!("Stream parsing error : failed to parse ticker {}", candle.symbol);
-                                                        }
-                                                    }
-                                                }
-                                                Err(err) => {
-                                                    error!("Stream parsing error : {}", err);
-                                                }
-                                            }
-                                        }
-                                        _ => {
-                                            debug!("Event not implemented");
-                                        }
-                                    },
-                                    None => {
+                                    }
+                                    _ => {
                                         error!("Unknown json");
                                     }
                                 },
@@ -305,5 +443,14 @@ impl Binance {
             }
             info!("Reconnecting");
         }
+    }
+}
+
+fn extract_ticker_from_stream(stream: &str) -> Option<Ticker> {
+    let parts: Vec<&str> = stream.split('@').collect();
+    if !parts.is_empty() {
+        Ticker::try_from(parts[0]).ok()
+    } else {
+        None
     }
 }

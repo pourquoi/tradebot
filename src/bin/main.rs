@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use futures::future;
+use futures_util::{SinkExt, StreamExt};
 use marketplace::binance::Binance;
 use marketplace::*;
 use order::{OrderSide, OrderStatus, OrderTrade};
@@ -16,16 +17,16 @@ use ticker::Ticker;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::select;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tokio_tungstenite::connect_async;
-use tracing::{error, info, trace};
+use tracing::{debug, error, info, trace};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use trading_bot::marketplace::MarketPlaceStream;
 use trading_bot::state::StateEvent;
 use trading_bot::strategy::StrategyAction;
 use tungstenite::Message;
 
-use futures::StreamExt;
+use trading_bot::strategy::scalping::ScalpingParams;
 use trading_bot::tui::app::App;
 use trading_bot::*;
 
@@ -52,6 +53,8 @@ enum Commands {
         replay_path: Option<PathBuf>,
         #[arg(long)]
         real: bool,
+        #[arg(long, default_value = "USDT")]
+        quote: String,
     },
     Replay {
         #[arg(long, value_delimiter = ',', default_value = "BTCUSDT")]
@@ -62,10 +65,16 @@ enum Commands {
         no_server: bool,
         #[arg(long)]
         replay_path: PathBuf,
+        #[arg(long, default_value = "USDT")]
+        quote: String,
+        #[arg(long, default_value = "1")]
+        interval: u64,
     },
     Tui {
         #[arg(long, default_value = "127.0.0.1:5555")]
         server_address: String,
+        #[arg(long, default_value = "USDT")]
+        quote: String,
     },
 }
 
@@ -91,6 +100,7 @@ async fn main() {
             let _ = run_account_info().await;
         }
         Some(Commands::Start {
+            quote,
             symbol,
             replay_path,
             server_address,
@@ -100,9 +110,11 @@ async fn main() {
                 .iter()
                 .flat_map(|symbol| Ticker::try_from(symbol))
                 .collect();
-            let _ = run_start(tickers, replay_path, server_address, real).await;
+            let _ = run_start(quote, tickers, replay_path, server_address, real).await;
         }
         Some(Commands::Replay {
+            interval,
+            quote,
             symbol,
             replay_path,
             server_address,
@@ -113,6 +125,8 @@ async fn main() {
                 .flat_map(|symbol| Ticker::try_from(symbol))
                 .collect();
             let _ = run_replay(
+                interval,
+                quote,
                 tickers,
                 replay_path,
                 if no_server {
@@ -123,8 +137,11 @@ async fn main() {
             )
             .await;
         }
-        Some(Commands::Tui { server_address }) => {
-            let _ = run_tui(server_address).await;
+        Some(Commands::Tui {
+            quote,
+            server_address,
+        }) => {
+            let _ = run_tui(quote, server_address).await;
         }
         _ => {}
     }
@@ -138,14 +155,15 @@ async fn run_account_info() -> Result<()> {
     Ok(())
 }
 
-async fn run_tui(server_address: String) -> Result<()> {
+async fn run_tui(quote: String, server_address: String) -> Result<()> {
     let (tx, rx) = tokio::sync::mpsc::channel::<AppEvent>(100);
-    let mut app = App::new(rx);
+    let (tx_cmd, mut rx_cmd) = tokio::sync::mpsc::channel::<AppCommandEvent>(100);
+    let mut app = App::new(rx, tx_cmd, quote);
 
     let ws_client_task = tokio::task::spawn(async move {
         // (re)connect loop
         loop {
-            let mut stream;
+            let stream;
             // wait for server
             loop {
                 let url = format!("ws://{}/ws", server_address);
@@ -158,19 +176,29 @@ async fn run_tui(server_address: String) -> Result<()> {
 
             let tx = tx.clone();
 
-            // forward websocket messages to tui channel
-            while let Some(Ok(msg)) = stream.next().await {
-                match msg {
-                    Message::Text(msg) => {
-                        if let Ok(event) = serde_json::de::from_slice::<AppEvent>(msg.as_bytes()) {
-                            let _ = tx.send(event).await;
+            let (mut write, mut read) = stream.split();
+
+            loop {
+                select! {
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(Message::Text(msg))) => {
+                                if let Ok(event) = serde_json::de::from_slice::<AppEvent>(msg.as_bytes()) {
+                                    let _ = tx.send(event).await;
+                                }
+                            },
+                        Some(Ok(Message::Close(_))) | None => {
+                                    break;
+                                }
+                            _ => {}
                         }
                     }
-                    Message::Close(frame) => {
-                        break;
+                    Some(cmd) = rx_cmd.recv() => {
+                        if let Ok(cmd) = serde_json::ser::to_string(&cmd) {
+                            let _ = write.send(Message::Text(cmd.into())).await;
+                        }
                     }
-                    _ => {}
-                };
+                }
             }
 
             // connection closed by server, wait before reconnecting
@@ -193,6 +221,7 @@ async fn run_tui(server_address: String) -> Result<()> {
 }
 
 async fn run_start(
+    quote: String,
     tickers: Vec<Ticker>,
     replay_path: Option<PathBuf>,
     server_address: String,
@@ -201,6 +230,7 @@ async fn run_start(
     let state: Arc<RwLock<state::State>> = Arc::from(RwLock::from(state::State::new()));
 
     let (tx_app, _) = tokio::sync::broadcast::channel::<AppEvent>(1000);
+    let (tx_cmd, _) = tokio::sync::mpsc::channel::<AppCommandEvent>(16);
 
     let mut marketplace = Binance::new();
     marketplace.init(&tickers).await?;
@@ -219,45 +249,63 @@ async fn run_start(
                         Asset {
                             symbol: ticker.base.clone(),
                             amount: dec!(0),
+                            locked: dec!(0),
                             value: None,
                         },
                     )
                 })
                 .collect();
             state.portfolio.assets.insert(
-                "USDT".to_string(),
+                quote.clone(),
                 Asset {
-                    symbol: "USDT".to_string(),
+                    symbol: quote.clone(),
                     amount: dec!(5000),
+                    locked: dec!(5000),
                     value: None,
                 },
             );
         }
     }
 
-    tokio::task::spawn({
-        let state = state.clone();
-        let tickers = tickers.clone();
-        let tx_app = tx_app.clone();
-        let mut rx = tx_app.subscribe();
-        let marketplace = marketplace.clone();
+    for ticker in tickers.iter() {
+        let mut strategy = ScalpingStrategy::new(
+            state.clone(),
+            marketplace.clone(),
+            ticker.clone(),
+            ScalpingParams {
+                target_profit: dec!(3),
+                quote_amount: dec!(300),
+                buy_cooldown: Duration::from_secs(60 * 15),
+                multiple_orders: true,
+            },
+        );
+        if strategy.init(None).await.is_err() {
+            panic!("Could not init strategy");
+        }
 
-        async move {
-            let mut strategy = ScalpingStrategy::new(state.clone(), marketplace, tickers);
+        tokio::task::spawn({
+            let state = state.clone();
+            let tx_app = tx_app.clone();
+            let mut rx = tx_app.subscribe();
 
-            loop {
-                let event = rx.recv().await;
-                if let Ok(AppEvent::MarketPlace(event)) = event {
-                    match strategy.on_marketplace_event(event).await {
-                        Ok(action) => {
-                            process_strategy_action(state.clone(), action, tx_app.clone()).await;
+            async move {
+                loop {
+                    let event = rx.recv().await;
+                    if let Ok(AppEvent::MarketPlace(event)) = event {
+                        match strategy.on_marketplace_event(event).await {
+                            Ok(actions) => {
+                                for action in actions {
+                                    process_strategy_action(state.clone(), action, tx_app.clone())
+                                        .await;
+                                }
+                            }
+                            Err(_) => {}
                         }
-                        Err(_) => {}
                     }
                 }
             }
-        }
-    });
+        });
+    }
 
     match replay_path {
         Some(replay_path) => tokio::task::spawn({
@@ -286,7 +334,7 @@ async fn run_start(
                                     .expect("Failed to write to store file");
                             }
                             Err(err) => {
-                                error!("Failed to save event");
+                                error!("Failed to save event : {}", err);
                             }
                         }
                     }
@@ -345,7 +393,8 @@ async fn run_start(
     let server_task = tokio::task::spawn({
         let state = state.clone();
         let tx_app = tx_app.clone();
-        async move { server::start(server_address, state, tx_app).await }
+        let tx_cmd = tx_cmd.clone();
+        async move { server::start(server_address, state, tx_app, tx_cmd).await }
     });
 
     info!("{}", "STARTING BOT".green());
@@ -359,13 +408,16 @@ async fn run_start(
 }
 
 async fn run_replay(
+    interval: u64,
+    quote: String,
     tickers: Vec<Ticker>,
     replay_path: PathBuf,
     server_address: Option<String>,
 ) -> Result<()> {
     let state: Arc<RwLock<state::State>> = Arc::from(RwLock::from(state::State::new()));
 
-    let (tx_app, _) = tokio::sync::broadcast::channel::<AppEvent>(1000);
+    let (tx_app, _) = tokio::sync::broadcast::channel::<AppEvent>(10000);
+    let (tx_cmd, mut rx_cmd) = tokio::sync::mpsc::channel::<AppCommandEvent>(16);
 
     let mut marketplace = Binance::new();
     marketplace.init(&tickers).await?;
@@ -381,44 +433,105 @@ async fn run_replay(
                     Asset {
                         symbol: ticker.base.clone(),
                         amount: dec!(0),
+                        locked: dec!(0),
                         value: None,
                     },
                 )
             })
             .collect();
         state.portfolio.assets.insert(
-            "USDT".to_string(),
+            quote.clone(),
             Asset {
-                symbol: "USDT".to_string(),
-                amount: dec!(5000),
+                symbol: quote.clone(),
+                amount: dec!(1000),
+                locked: dec!(0),
                 value: None,
             },
         );
     }
 
-    tokio::task::spawn({
-        let state = state.clone();
-        let tickers = tickers.clone();
-        let tx_app = tx_app.clone();
-        let mut rx = tx_app.subscribe();
-        let marketplace = marketplace.clone();
+    let mut start_time: Option<u64> = None;
+    {
+        let file = File::open(replay_path.clone())
+            .await
+            .expect("Failed to open replay file");
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
 
-        async move {
-            let mut strategy = ScalpingStrategy::new(state.clone(), marketplace, tickers);
-            loop {
-                // wait for a marketplace event
-                let event = rx.recv().await;
-                if let Ok(AppEvent::MarketPlace(event)) = event {
-                    match strategy.on_marketplace_event(event).await {
-                        Ok(action) => {
-                            process_strategy_action(state.clone(), action, tx_app.clone()).await;
-                        }
-                        Err(_) => {}
+        while let Ok(Some(line)) = lines.next_line().await {
+            match serde_json::de::from_str::<MarketPlaceEvent>(&line) {
+                Ok(event) => match event {
+                    MarketPlaceEvent::Depth(event) => {
+                        start_time = Some(event.time);
+                        break;
                     }
+                    _ => {}
+                },
+                Err(err) => {
+                    error!("Failed parsing replay line : {}", err);
+                    break;
                 }
             }
         }
-    });
+    }
+    if start_time.is_none() {
+        panic!("Could not find start time from replay file");
+    }
+
+    for ticker in tickers.iter() {
+        let mut strategy = ScalpingStrategy::new(
+            state.clone(),
+            marketplace.clone(),
+            ticker.clone(),
+            ScalpingParams {
+                target_profit: dec!(1.5),
+                quote_amount: dec!(100),
+                buy_cooldown: Duration::from_secs(60 * 1),
+                multiple_orders: true,
+            },
+        );
+        if strategy.init(start_time).await.is_err() {
+            panic!("Could not init strategy");
+        }
+
+        tokio::task::spawn({
+            let state = state.clone();
+            let tx_app = tx_app.clone();
+            let mut rx = tx_app.subscribe();
+
+            async move {
+                loop {
+                    // wait for a marketplace event
+                    match rx.recv().await {
+                        Ok(AppEvent::MarketPlace(event)) => {
+                            debug!("MarketPlace event : {:?}", event);
+                            match strategy.on_marketplace_event(event).await {
+                                Ok(actions) => {
+                                    for action in actions {
+                                        process_strategy_action(
+                                            state.clone(),
+                                            action,
+                                            tx_app.clone(),
+                                        )
+                                        .await;
+                                    }
+                                }
+                                Err(err) => {
+                                    error!("Failed to process marketplace event : {}", err)
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            error!("Receive event error : {}", err);
+                        }
+                        Ok(other) => {
+                            debug!("AppEvent : {:?}", other);
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     tokio::task::spawn({
         let state = state.clone();
@@ -451,8 +564,27 @@ async fn run_replay(
         async move { print_overview(state).await }
     });
 
+    let (pause_tx, pause_rx) = watch::channel(false);
+    tokio::task::spawn({
+        let pause_tx = pause_tx.clone();
+        async move {
+            loop {
+                if let Some(cmd) = rx_cmd.recv().await {
+                    info!("Got command {:?}", cmd);
+                    match cmd {
+                        AppCommandEvent::Pause => {
+                            let new_state = !*pause_tx.borrow();
+                            pause_tx.send(new_state).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     let marketplace_task = tokio::task::spawn({
         let tx_app = tx_app.clone();
+        let mut pause_rx = pause_rx.clone();
 
         async move {
             let file = File::open(replay_path)
@@ -463,14 +595,19 @@ async fn run_replay(
 
             let mut i = 0;
             while let Ok(Some(line)) = lines.next_line().await {
+                while *pause_rx.borrow() {
+                    pause_rx.changed().await.unwrap();
+                }
                 if let Ok(event) = serde_json::de::from_str(&line) {
                     tx_app.send(AppEvent::MarketPlace(event)).unwrap();
                     i += 1;
-                    if i % 1000 == 0 {
-                        tokio::time::sleep(Duration::from_micros(10)).await;
+
+                    if interval > 0 {
+                        tokio::time::sleep(Duration::from_micros(interval)).await;
                     }
                 }
             }
+            tokio::time::sleep(Duration::from_secs(10)).await;
         }
     });
 
@@ -478,8 +615,9 @@ async fn run_replay(
         Some(server_address) => tokio::task::spawn({
             let state = state.clone();
             let tx_app = tx_app.clone();
+            let tx_cmd = tx_cmd.clone();
             async move {
-                let _ = server::start(server_address, state, tx_app).await;
+                let _ = server::start(server_address, state, tx_app, tx_cmd).await;
             }
         }),
         None => tokio::task::spawn({
@@ -505,19 +643,20 @@ async fn simulate_new_orders_processing(
     tx_app: tokio::sync::broadcast::Sender<AppEvent>,
     is_replay: bool,
 ) {
-    let mut rx = tx_app.subscribe();
     loop {
         // get simulation time
-        // this will "skip" one trade but it's actually more realistic
-        let event = rx.recv().await;
-        let time = if let Ok(AppEvent::MarketPlace(MarketPlaceEvent::Trade(event))) = event {
-            event.trade_time
-        } else {
-            continue;
+        let time = {
+            let mut rx = tx_app.subscribe();
+            let event = rx.recv().await;
+            if let Ok(AppEvent::MarketPlace(MarketPlaceEvent::Depth(event))) = event {
+                event.time
+            } else {
+                continue;
+            }
         };
 
         let mut state = state.write().await;
-        let State { orders, .. } = &mut *state;
+        let State { orders, portfolio } = &mut *state;
 
         let mut processed = false;
 
@@ -526,6 +665,23 @@ async fn simulate_new_orders_processing(
             .filter(|order| matches!(order.status, OrderStatus::Sent))
         {
             if order.creation_time + 2000_u64 < time {
+                match portfolio.reserve_funds(
+                    match order.side {
+                        OrderSide::Buy => &order.ticker.quote,
+                        OrderSide::Sell => &order.ticker.base,
+                    },
+                    match order.side {
+                        OrderSide::Buy => order.amount * order.price,
+                        OrderSide::Sell => order.amount,
+                    },
+                ) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        order.status = OrderStatus::Rejected;
+                        processed = true;
+                        continue;
+                    }
+                }
                 order.status = OrderStatus::Active;
                 order.working_time = Some(time);
             }
@@ -568,7 +724,7 @@ async fn simulate_orders_processing<M>(
     let mut rx = tx_app.subscribe();
     loop {
         let event = rx.recv().await;
-        if let Ok(AppEvent::MarketPlace(MarketPlaceEvent::Trade(event))) = event {
+        if let Ok(AppEvent::MarketPlace(MarketPlaceEvent::Depth(event))) = event {
             let mut processed = false;
             let mut state = state.write().await;
 
@@ -582,25 +738,28 @@ async fn simulate_orders_processing<M>(
             }) {
                 // simulate if a trade will eat part of the order
                 let trade_amount = match order.order_type {
-                    order::OrderType::Market => Some(event.quantity * dec!(0.1)),
+                    order::OrderType::Market => match order.side {
+                        OrderSide::Sell => event.bids.first().clone(),
+                        OrderSide::Buy => event.asks.first().clone(),
+                    },
                     order::OrderType::Limit => {
                         match order.side {
                             // sell order : if the trade price >= order price, it will be eaten
-                            OrderSide::Sell => {
-                                if event.price >= order.price {
-                                    Some(event.quantity * dec!(0.1))
+                            OrderSide::Sell => event.bids.first().and_then(|bid| {
+                                if bid.0 >= order.price {
+                                    Some(bid)
                                 } else {
                                     None
                                 }
-                            }
+                            }),
                             // buy order : if the trade price <= order price, it will be eaten
-                            OrderSide::Buy => {
-                                if event.price <= order.price {
-                                    Some(event.quantity * dec!(0.1))
+                            OrderSide::Buy => event.asks.first().and_then(|ask| {
+                                if ask.0 <= order.price {
+                                    Some(ask)
                                 } else {
                                     None
                                 }
-                            }
+                            }),
                         }
                     }
                     _ => None,
@@ -612,38 +771,35 @@ async fn simulate_orders_processing<M>(
                 }
                 let trade_amount = trade_amount.unwrap();
 
-                // simulate a marketplace request
-                if !is_replay {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-
                 let to_fulfill = order.amount - order.filled_amount;
-                let order_trade = if to_fulfill > trade_amount {
-                    order.filled_amount += trade_amount;
+                //let to_fulfill_quote = order.amount * order.price - order.get_trade_total_price();
+
+                let order_trade = if to_fulfill > trade_amount.1 {
+                    order.filled_amount += trade_amount.1;
                     info!(
-                        "{} for order {} {}/{} : +{}",
+                        " {} for order {} {}/{} : +{}",
                         match order.side {
                             OrderSide::Buy => "PARTIAL BUY".green(),
-                            OrderSide::Sell => "PARTIAL SELL".green(),
+                            OrderSide::Sell => "PARTIAL SELL".red(),
                         },
                         Ticker::to_string(&event.ticker),
                         order.filled_amount,
                         order.amount,
-                        trade_amount
+                        trade_amount.1
                     );
                     OrderTrade {
-                        trade_time: event.trade_time,
-                        amount: trade_amount,
-                        price: event.price,
+                        trade_time: event.time,
+                        amount: trade_amount.1,
+                        price: trade_amount.0,
                     }
                 } else {
                     order.status = OrderStatus::Executed;
                     order.filled_amount = order.amount;
                     info!(
-                        "{} for order {} {}/{} : +{}",
+                        " {} for order {} {}/{} : +{}",
                         match order.side {
                             OrderSide::Buy => "FINAL BUY".green(),
-                            OrderSide::Sell => "FINAL SELL".green(),
+                            OrderSide::Sell => "FINAL SELL".red(),
                         },
                         Ticker::to_string(&event.ticker),
                         order.filled_amount,
@@ -651,25 +807,23 @@ async fn simulate_orders_processing<M>(
                         to_fulfill
                     );
                     OrderTrade {
-                        trade_time: event.trade_time,
+                        trade_time: event.time,
                         amount: to_fulfill,
-                        price: event.price,
+                        price: trade_amount.0,
                     }
                 };
 
                 order.trades.push(order_trade.clone());
 
-                let fees = marketplace.get_fees(order).await;
+                let fees = marketplace.get_fees().await;
 
-                let price = match order.order_type {
-                    order::OrderType::Market => event.price,
-                    _ => order.price,
-                };
+                let price = trade_amount.0;
 
                 match order.side {
                     OrderSide::Sell => {
                         // increase portfolio quote asset
                         let added_quote_amount = price * order_trade.amount * (dec!(1) - fees);
+                        info!(" ADDED {} {}", added_quote_amount, order.ticker.quote);
                         portfolio.update_asset_amount(
                             &order.ticker.quote,
                             added_quote_amount,
@@ -677,28 +831,27 @@ async fn simulate_orders_processing<M>(
                         );
 
                         // decrease portfolio base asset
-                        //
-                        // todo : check if fees apply
-                        //let removed_base_amount = order_trade.amount;
-                        //    order_trade.amount * (dec!(1) - fees);
                         let removed_base_amount = order_trade.amount;
-                        portfolio.update_asset_amount(
+                        info!(" REMOVED {} {}", removed_base_amount, order.ticker.base);
+                        portfolio.drain_asset_locked(
                             &order.ticker.base,
-                            -removed_base_amount,
+                            removed_base_amount,
                             price,
                         );
                     }
                     OrderSide::Buy => {
                         // increase portfolio base asset
                         let added_base_amount = order_trade.amount * (dec!(1) - fees);
+                        info!(" ADDED {} {}", added_base_amount, order.ticker.base);
                         portfolio.update_asset_amount(&order.ticker.base, added_base_amount, price);
 
                         // decrease portfolio quote asset
                         // no fees, they apply to the bought asset
                         let removed_quote_amount = price * order_trade.amount;
-                        portfolio.update_asset_amount(
+                        info!(" REMOVED {} {}", removed_quote_amount, order.ticker.quote);
+                        portfolio.drain_asset_locked(
                             &order.ticker.quote,
-                            -removed_quote_amount,
+                            removed_quote_amount,
                             dec!(1),
                         );
                     }
@@ -733,11 +886,13 @@ async fn update_portfolio_value(
     let mut rx = tx_app.subscribe();
     loop {
         let event = rx.recv().await;
-        if let Ok(AppEvent::MarketPlace(MarketPlaceEvent::Trade(event))) = event {
+        if let Ok(AppEvent::MarketPlace(MarketPlaceEvent::Depth(event))) = event {
             let mut state = state.write().await;
             if let Some(asset) = state.portfolio.assets.get_mut(&event.ticker.base) {
-                asset.value = Some(asset.amount * event.price);
-                state.portfolio.update_value();
+                if let Some(buy_price) = event.buy_price() {
+                    asset.value = Some((asset.amount + asset.locked) * buy_price);
+                    state.portfolio.update_value();
+                }
             }
         }
     }
@@ -766,7 +921,7 @@ async fn process_strategy_action(
     tx: tokio::sync::broadcast::Sender<AppEvent>,
 ) {
     match &action {
-        StrategyAction::Order { order } => {
+        StrategyAction::PlaceOrder { order } => {
             info!("{:?}", order);
             let mut state = state.write().await;
             let _ = state.add_order(order.clone());
