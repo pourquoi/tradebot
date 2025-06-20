@@ -11,3 +11,9 @@ spot market streams
 trading api
 ---
 [new order](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/trading-endpoints)
+
+keys
+---
+https://github.com/binance/binance-spot-api-docs/blob/master/testnet/web-socket-api.md#signed-request-example-ed25519
+openssl genpkey -algorithm ed25519 -out priv.pem
+openssl pkey -in priv.pem -pubout -out pub.pem

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-
-use crate::{marketplace::MarketPlaceEvent, order::Order, ticker::Ticker};
+use tokio::sync::broadcast::Sender;
+use crate::{marketplace::MarketplaceEvent, order::Order, ticker::Ticker, AppEvent};
 
 pub mod scalping;
 
@@ -34,8 +34,8 @@ pub enum StrategyAction {
 }
 
 pub trait Strategy {
-    fn on_marketplace_event(
+    fn start(
         &mut self,
-        event: MarketPlaceEvent,
+        tx_app: Sender<AppEvent>,
     ) -> impl std::future::Future<Output = Result<Vec<StrategyAction>>>;
 }

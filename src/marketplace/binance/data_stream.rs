@@ -13,10 +13,11 @@ use tracing::error;
 use tracing::info;
 use tungstenite::Message;
 
-use crate::marketplace::CandleEvent;
-use crate::marketplace::DepthEvent;
-use crate::marketplace::MarketPlaceEvent;
-use crate::marketplace::TradeEvent;
+use crate::marketplace::binance::STREAM_ENDPOINT;
+use crate::marketplace::MarketplaceBook;
+use crate::marketplace::MarketplaceCandle;
+use crate::marketplace::MarketplaceEvent;
+use crate::marketplace::MarketplaceTrade;
 use crate::ticker::Ticker;
 use crate::AppEvent;
 
@@ -217,18 +218,16 @@ impl Binance {
             .join("/");
 
         let request = format!(
-            "wss://stream.binance.com/stream?streams={}/{}",
-            candle_params, depth_params
+            "{}/stream?streams={}/{}",
+            *STREAM_ENDPOINT, candle_params, depth_params
         );
-        info!("Connecting to market data stream {request}");
 
         loop {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-
             let mut ws_stream;
             let response;
 
             loop {
+                info!("Connecting to market data stream {request}");
                 match connect_async(request.clone()).await {
                     Ok(res) => {
                         ws_stream = res.0;
@@ -236,7 +235,7 @@ impl Binance {
                         break;
                     }
                     Err(err) => {
-                        info!("Failed to connect to stream: {:?}", err);
+                        info!("Failed to connect to stream: {err}");
                         tokio::time::sleep(Duration::from_secs(10)).await;
                     }
                 }
@@ -265,8 +264,8 @@ impl Binance {
                                                             Ok(ticker) => {
                                                                 let _ =
                                                                     tx.send(AppEvent::MarketPlace(
-                                                                        MarketPlaceEvent::Trade(
-                                                                            TradeEvent {
+                                                                        MarketplaceEvent::Trade(
+                                                                            MarketplaceTrade {
                                                                                 ticker,
                                                                                 price: trade.price,
                                                                                 quantity: trade
@@ -298,8 +297,8 @@ impl Binance {
                                                             Ok(ticker) => {
                                                                 let _ =
                                                                     tx.send(AppEvent::MarketPlace(
-                                                                        MarketPlaceEvent::Candle(
-                                                                            CandleEvent {
+                                                                        MarketplaceEvent::Candle(
+                                                                            MarketplaceCandle {
                                                                                 ticker,
                                                                                 high_price: candle
                                                                                     .data
@@ -352,7 +351,7 @@ impl Binance {
                                                         match Ticker::try_from(&depth.symbol) {
                                                             Ok(ticker) => {
                                                                 let _ = tx.send(AppEvent::MarketPlace(
-                                                                    MarketPlaceEvent::Depth(DepthEvent {
+                                                                    MarketplaceEvent::Book(MarketplaceBook {
                                                                         ticker,
                                                                         first_update_id: depth.first_update_id,
                                                                         final_update_id: depth.final_update_id,
@@ -385,7 +384,7 @@ impl Binance {
                                                         ) {
                                                             Ok(depth) => {
                                                                 let _ = tx.send(AppEvent::MarketPlace(
-                                                                    MarketPlaceEvent::Depth(DepthEvent {
+                                                                    MarketplaceEvent::Book(MarketplaceBook {
                                                                         ticker: ticker.clone(),
                                                                         first_update_id: 0,
                                                                         final_update_id: depth.last_update_id,
@@ -436,12 +435,14 @@ impl Binance {
                         break;
                     }
                     Err(err) => {
-                        error!("Stream error: {}", err);
+                        error!("Stream timeout: {}", err);
                         break;
                     }
                 }
             }
+
             info!("Reconnecting");
+            tokio::time::sleep(Duration::from_secs(3)).await;
         }
     }
 }

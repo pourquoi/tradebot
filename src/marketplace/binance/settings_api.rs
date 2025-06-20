@@ -90,7 +90,7 @@ impl Binance {
         let url_params = [("symbols", symbols_param)];
 
         let url = Url::parse_with_params(
-            format!("{}/api/v3/exchangeInfo", ENDPOINT).as_str(),
+            format!("{}/api/v3/exchangeInfo", *ENDPOINT).as_str(),
             url_params,
         )
         .unwrap();
@@ -102,14 +102,5 @@ impl Binance {
         let r: ExchangeInfo = serde_json::de::from_str(r.as_str()).unwrap();
 
         Ok(r)
-    }
-
-    async fn ping(&self) -> Result<()> {
-        let _ = self
-            .client
-            .get(format!("{ENDPOINT}/api/v3/ping"))
-            .send()
-            .await?;
-        Ok(())
     }
 }

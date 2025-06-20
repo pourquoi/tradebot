@@ -25,7 +25,7 @@ use std::{
 use tokio::sync::mpsc::{self, Receiver};
 
 use crate::{
-    marketplace::{CandleEvent, MarketPlaceEvent, TradeEvent},
+    marketplace::{MarketplaceCandle, MarketplaceEvent, MarketplaceTrade},
     order::{Order, OrderSide, OrderTrade},
     portfolio::{Asset, Portfolio},
     state::StateEvent,
@@ -48,9 +48,10 @@ pub struct App {
     tx: mpsc::Sender<AppCommandEvent>,
     portfolio: Portfolio,
     orders: Vec<Order>,
+    tickers: Vec<Ticker>,
     last_strategy_events: HashMap<Ticker, HashMap<String, (u64, String)>>,
-    candles: HashMap<Ticker, VecDeque<CandleEvent>>,
-    trades: HashMap<Ticker, VecDeque<TradeEvent>>,
+    candles: HashMap<Ticker, VecDeque<MarketplaceCandle>>,
+    trades: HashMap<Ticker, VecDeque<MarketplaceTrade>>,
     selected_window: Window,
     selected_asset: Option<String>,
     order_table_state: TableState,
@@ -59,12 +60,18 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(rx: Receiver<AppEvent>, tx: mpsc::Sender<AppCommandEvent>, quote: String) -> Self {
+    pub fn new(
+        rx: Receiver<AppEvent>,
+        tx: mpsc::Sender<AppCommandEvent>,
+        quote: String,
+        tickers: Vec<Ticker>,
+    ) -> Self {
         Self {
             should_quit: false,
             rx,
             tx,
             quote,
+            tickers,
             last_strategy_events: HashMap::new(),
             candles: HashMap::new(),
             trades: HashMap::new(),
@@ -102,7 +109,16 @@ impl App {
     fn handle_app_events(&mut self, event: AppEvent) {
         match event {
             AppEvent::State(StateEvent::Portfolio(portfolio)) => {
-                self.portfolio = portfolio.clone();
+                self.portfolio.assets = portfolio
+                    .assets
+                    .into_iter()
+                    .filter(|asset| {
+                        self.tickers
+                            .iter()
+                            .find(|ticker| ticker.base == asset.0)
+                            .is_some()
+                    })
+                    .collect();
             }
             AppEvent::State(StateEvent::Orders(orders)) => {
                 self.orders = orders;
@@ -127,7 +143,7 @@ impl App {
                 }
                 _ => {}
             },
-            AppEvent::MarketPlace(MarketPlaceEvent::Candle(candle)) => {
+            AppEvent::MarketPlace(MarketplaceEvent::Candle(candle)) => {
                 let candles = self.candles.entry(candle.ticker.clone()).or_default();
                 if let Some(last) = candles.pop_back() {
                     if last.start_time != candle.start_time {
@@ -139,7 +155,7 @@ impl App {
                     candles.pop_front();
                 }
             }
-            AppEvent::MarketPlace(MarketPlaceEvent::Trade(trade)) => {
+            AppEvent::MarketPlace(MarketplaceEvent::Trade(trade)) => {
                 let trades = self
                     .trades
                     .entry(trade.ticker.clone())
@@ -384,12 +400,12 @@ impl App {
                         },
                     )),
                     Cell::from(format!("{}", order.status)),
-                    Cell::from(format!("{}", order.price * order.amount)),
+                    Cell::from(format!("{}", order.cumulative_quote_amount)),
                     Cell::from(format!(
                         "{}%",
                         (dec!(100) * order.filled_amount / order.amount).round_dp(2)
                     )),
-                    Cell::from(format!("{}", order.price)),
+                    Cell::from(format!("{}", order.get_order_base_price())),
                     Cell::from(format!("{}", order.amount)),
                 ])
                 .style(match self.selected_window {
@@ -611,7 +627,7 @@ impl App {
                             .iter()
                             .filter(|order| order.side == OrderSide::Buy)
                             .map(|order| {
-                                (order.creation_time as f64, order.price.to_f64().unwrap())
+                                (order.creation_time as f64, order.get_order_base_price().to_f64().unwrap())
                             })
                             .collect();
                         let dataset_buy_orders = Dataset::default()
@@ -625,7 +641,7 @@ impl App {
                             .iter()
                             .filter(|order| order.side == OrderSide::Sell)
                             .map(|order| {
-                                (order.creation_time as f64, order.price.to_f64().unwrap())
+                                (order.creation_time as f64, order.get_order_base_price().to_f64().unwrap())
                             })
                             .collect();
                         let dataset_sell_orders = Dataset::default()

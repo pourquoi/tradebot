@@ -5,22 +5,53 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
 
-use crate::{order::Order, portfolio::Asset, ticker::Ticker, AppEvent};
+use crate::{
+    order::{Order, OrderStatus, OrderTrade},
+    portfolio::Asset,
+    ticker::Ticker,
+    AppEvent,
+};
 
 pub mod binance;
+pub mod replay;
+pub mod simulation;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum MarketPlaceEvent {
+pub enum MarketplaceEvent {
     #[serde(rename = "P")]
-    Trade(TradeEvent),
+    Trade(MarketplaceTrade),
     #[serde(rename = "C")]
-    Candle(CandleEvent),
+    Candle(MarketplaceCandle),
     #[serde(rename = "D")]
-    Depth(DepthEvent),
+    Book(MarketplaceBook),
+    #[serde(rename = "A")]
+    PortfolioUpdate(MarketplacePortfolioUpdate),
+    #[serde(rename = "O")]
+    OrderUpdate(MarketplaceOrderUpdate),
+}
+
+impl MarketplaceEvent {
+    fn get_ticker(&self) -> Option<&Ticker> {
+        match &self {
+            Self::Trade(event) => Some(&event.ticker),
+            Self::Candle(event) => Some(&event.ticker),
+            Self::Book(event) => Some(&event.ticker),
+            _ => None,
+        }
+    }
+
+    fn get_time(&self) -> Option<u64> {
+        match &self {
+            Self::Trade(event) => Some(event.trade_time),
+            Self::Candle(event) => Some(event.close_time),
+            Self::Book(event) => Some(event.time),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct TradeEvent {
+pub struct MarketplaceTrade {
     #[serde(rename = "t")]
     pub trade_id: u64,
 
@@ -40,7 +71,7 @@ pub struct TradeEvent {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CandleEvent {
+pub struct MarketplaceCandle {
     #[serde(rename = "s")]
     pub ticker: Ticker,
 
@@ -78,7 +109,7 @@ pub struct CandleEvent {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct DepthEvent {
+pub struct MarketplaceBook {
     #[serde(rename = "s")]
     pub ticker: Ticker,
 
@@ -106,7 +137,7 @@ pub struct DepthEvent {
     pub bids: Vec<(Decimal, Decimal)>,
 }
 
-impl DepthEvent {
+impl MarketplaceBook {
     pub fn buy_price(&self) -> Option<Decimal> {
         self.bids.first().map(|(price, _)| *price)
     }
@@ -115,27 +146,60 @@ impl DepthEvent {
     }
 }
 
-pub trait MarketPlace {}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MarketplacePortfolioUpdate {
+    #[serde(rename = "E")]
+    pub time: u64,
+    #[serde(rename = "B")]
+    pub assets: Vec<Asset>,
+}
 
-pub trait MarketPlaceStream {
-    fn start(
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MarketplaceOrderUpdate {
+    #[serde(rename = "E")]
+    pub time: u64,
+    #[serde(rename = "x")]
+    pub update_type: String,
+    #[serde(rename = "i")]
+    pub marketplace_id: String,
+    #[serde(rename = "c")]
+    pub client_id: String,
+    #[serde(rename = "s")]
+    pub status: OrderStatus,
+    #[serde(rename = "W")]
+    pub working_time: Option<u64>,
+    #[serde(rename = "T")]
+    pub trade: Option<OrderTrade>,
+}
+
+pub trait Marketplace {}
+
+pub trait MarketplaceDataStream {
+    fn start_data_stream(
         &mut self,
         tickers: &Vec<Ticker>,
         tx: Sender<AppEvent>,
-    ) -> impl std::future::Future<Output = ()>;
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
 }
 
-pub trait MarketPlaceData {
+pub trait MarketplaceAccountStream {
+    fn start_account_stream(
+        &mut self,
+        tx: Sender<AppEvent>,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
+}
+
+pub trait MarketplaceDataApi {
     fn get_candles(
         &self,
         ticker: &Ticker,
         interval: &str,
         from: Option<u64>,
         to: Option<u64>,
-    ) -> impl std::future::Future<Output = Result<Vec<CandleEvent>>>;
+    ) -> impl std::future::Future<Output = Result<Vec<MarketplaceCandle>>>;
 }
 
-pub trait MarketPlaceSettings {
+pub trait MarketplaceSettingsApi {
     // Get the fees ratio for this order.
     fn get_fees(&self) -> impl std::future::Future<Output = Decimal>;
 
@@ -146,16 +210,24 @@ pub trait MarketPlaceSettings {
     ) -> impl std::future::Future<Output = Result<()>>;
 }
 
-pub trait MarketPlaceAccount {
+pub trait MarketplaceAccountApi {
     fn get_account_assets(
         &mut self,
     ) -> impl std::future::Future<Output = Result<HashMap<String, Asset>>>;
 }
 
-pub trait MarketPlaceTrade {
+pub trait MarketplaceTradeApi {
     fn get_orders(
         &self,
         tickers: &Vec<Ticker>,
     ) -> impl std::future::Future<Output = Result<Vec<Order>>>;
-    fn place_order(&self, order: &Order) -> impl std::future::Future<Output = Result<Order>>;
+
+    fn place_order(&mut self, order: &Order) -> impl std::future::Future<Output = Result<Order>>;
+}
+
+pub trait MarketplaceMatching {
+    fn start_matching(
+        &mut self,
+        app_tx: Sender<AppEvent>,
+    ) -> impl std::future::Future<Output = Result<()>>;
 }

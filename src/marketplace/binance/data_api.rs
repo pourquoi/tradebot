@@ -9,8 +9,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tracing::info;
 
-use crate::marketplace::binance::{Binance, ENDPOINT, PUBLIC_MARKET_ENDPOINT};
-use crate::marketplace::CandleEvent;
+use crate::marketplace::binance::{Binance, ENDPOINT, PUBLIC_ENDPOINT};
+use crate::marketplace::MarketplaceCandle;
 use crate::ticker::Ticker;
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -27,8 +27,8 @@ pub struct Candle {
 }
 
 impl Candle {
-    pub fn into_candle_event(self, ticker: Ticker) -> CandleEvent {
-        CandleEvent {
+    pub fn into_candle_event(self, ticker: Ticker) -> MarketplaceCandle {
+        MarketplaceCandle {
             ticker,
             open_price: self.open_price,
             close_price: self.close_price,
@@ -164,7 +164,7 @@ impl Binance {
             params.push(("endTime", to.to_string()));
         }
         let url = Url::parse_with_params(
-            format!("{PUBLIC_MARKET_ENDPOINT}/api/v3/klines").as_str(),
+            format!("{}/api/v3/klines", *PUBLIC_ENDPOINT).as_str(),
             &params,
         )
         .unwrap();
@@ -179,7 +179,7 @@ impl Binance {
     }
 
     pub async fn get_depth(&self, ticker: &Ticker) -> Result<Depth> {
-        let url = format!("{ENDPOINT}/api/v3/depth?symbol={}", ticker);
+        let url = format!("{}/api/v3/depth?symbol={}", *ENDPOINT, ticker);
         info!("{}", url);
         let r = self.client.get(url).send().await?;
         let depth: Depth = r.json().await?;

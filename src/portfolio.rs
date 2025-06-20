@@ -29,6 +29,13 @@ impl Portfolio {
         }
     }
 
+    pub fn update_asset_value(&mut self, symbol: &String, price: Decimal) {
+        if let Some(asset) = self.assets.get_mut(symbol) {
+            asset.value = Some((asset.locked + asset.amount) * price);
+            self.update_value();
+        }
+    }
+
     pub fn check_funds(&self, asset: &String, required_amount: Decimal) -> bool {
         match self.assets.get(asset) {
             Some(asset) => asset.amount >= required_amount,
@@ -48,7 +55,6 @@ impl Portfolio {
                 }
                 asset.amount -= amount;
                 asset.locked += amount;
-                info!(" RESERVED {} {}", amount, asset.symbol);
                 Ok(())
             }
             None => Err(anyhow!("Asset {} not in portfolio", asset)),
@@ -78,6 +84,10 @@ impl Portfolio {
                 None => Some(keys[0].clone()),
             },
         }
+    }
+
+    pub fn update_asset(&mut self, asset: Asset) {
+        self.assets.insert(asset.symbol.clone(), asset);
     }
 
     pub fn update_asset_amount(&mut self, symbol: &String, delta: Decimal, current_price: Decimal) {

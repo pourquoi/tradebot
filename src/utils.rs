@@ -10,8 +10,6 @@ use yata::{
 
 use rust_decimal::Decimal;
 
-use crate::marketplace::CandleEvent;
-
 // Simple Moving Average
 // prices: recent to older
 pub fn sma(prices: &[Decimal], period: usize) -> Option<Decimal> {

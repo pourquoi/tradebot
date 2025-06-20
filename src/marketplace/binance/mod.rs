@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::env::var;
+use std::sync::{Arc, LazyLock};
 
 use crate::marketplace::binance::utils::ceil_to_step;
 use crate::order::Order;
@@ -9,27 +10,34 @@ use crate::AppEvent;
 use account_api::AccountOverview;
 use anyhow::anyhow;
 use anyhow::{Context, Result};
-use exchange_info_api::ExchangeInfo;
-use exchange_info_api::SymbolInfoFilter;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use settings_api::ExchangeInfo;
+use settings_api::SymbolInfoFilter;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
 use tracing::error;
 
-use super::MarketPlaceSettings;
-use super::MarketPlaceStream;
-use super::MarketPlaceTrade;
-use super::{MarketPlaceAccount, MarketPlaceData};
+use super::MarketplaceDataStream;
+use super::MarketplaceSettingsApi;
+use super::MarketplaceTradeApi;
+use super::{MarketplaceAccountApi, MarketplaceDataApi};
 
-const ENDPOINT: &str = "https://api.binance.com";
-const PUBLIC_MARKET_ENDPOINT: &str = "https://data-api.binance.vision";
+static ENDPOINT: LazyLock<String> = LazyLock::new(|| var("BINANCE_ENDPOINT").unwrap());
+static PUBLIC_ENDPOINT: LazyLock<String> = LazyLock::new(|| {
+    let default = var("BINANCE_ENDPOINT").unwrap();
+    var("BINANCE_PUBLIC_ENDPOINT").unwrap_or(default)
+});
+static STREAM_ENDPOINT: LazyLock<String> =
+    LazyLock::new(|| var("BINANCE_STREAM_ENDPOINT").unwrap());
+static WS_ENDPOINT: LazyLock<String> = LazyLock::new(|| var("BINANCE_WS_ENDPOINT").unwrap());
 
 pub mod account_api;
-pub mod exchange_info_api;
-pub mod market_data_api;
-pub mod market_data_stream;
+pub mod account_stream;
+pub mod data_api;
+pub mod data_stream;
+pub mod settings_api;
 pub mod trade_api;
 mod utils;
 
@@ -43,6 +51,7 @@ pub struct Binance {
 impl Binance {
     pub fn new() -> Self {
         let client = Client::builder().build().unwrap();
+
         Self {
             client,
             ..Default::default()
@@ -62,15 +71,20 @@ impl Binance {
     }
 }
 
-impl crate::marketplace::MarketPlace for Binance {}
+impl crate::marketplace::Marketplace for Binance {}
 
-impl MarketPlaceStream for Binance {
-    async fn start(&mut self, tickers: &Vec<Ticker>, tx: Sender<AppEvent>) {
+impl MarketplaceDataStream for Binance {
+    async fn start_data_stream(
+        &mut self,
+        tickers: &Vec<Ticker>,
+        tx: Sender<AppEvent>,
+    ) -> anyhow::Result<()> {
         self.connect_stream(&tickers, tx).await;
+        Ok(())
     }
 }
 
-impl MarketPlaceSettings for Binance {
+impl MarketplaceSettingsApi for Binance {
     async fn get_fees(&self) -> Decimal {
         let account = self.account_overview.read().await;
         let account = account.as_ref();
@@ -139,18 +153,19 @@ impl MarketPlaceSettings for Binance {
         }
 
         order.amount = amount;
+        order.quote_amount = ceil_to_step(order.amount * order.price, dec!(0.01));
         Ok(())
     }
 }
 
-impl MarketPlaceData for Binance {
+impl MarketplaceDataApi for Binance {
     async fn get_candles(
         &self,
         ticker: &Ticker,
         interval: &str,
         from: Option<u64>,
         to: Option<u64>,
-    ) -> Result<Vec<super::CandleEvent>> {
+    ) -> Result<Vec<super::MarketplaceCandle>> {
         let candles = self
             .get_candles(format!("{}", ticker).as_str(), interval, from, to)
             .await?;
@@ -161,7 +176,7 @@ impl MarketPlaceData for Binance {
     }
 }
 
-impl MarketPlaceAccount for Binance {
+impl MarketplaceAccountApi for Binance {
     async fn get_account_assets(&mut self) -> Result<HashMap<String, Asset>> {
         let account_overview = self.get_account_overview(false).await?;
 
@@ -185,7 +200,7 @@ impl MarketPlaceAccount for Binance {
     }
 }
 
-impl MarketPlaceTrade for Binance {
+impl MarketplaceTradeApi for Binance {
     async fn get_orders(&self, tickers: &Vec<Ticker>) -> Result<Vec<Order>> {
         let mut orders = Vec::new();
         for ticker in tickers {
@@ -203,8 +218,8 @@ impl MarketPlaceTrade for Binance {
         Ok(orders)
     }
 
-    async fn place_order(&self, order: &Order) -> Result<Order> {
-        let res = self.place_order(order).await?;
+    async fn place_order(&mut self, order: &Order) -> Result<Order> {
+        let res = Binance::place_order(self, order).await?;
         Order::try_from(res).map_err(|err| anyhow!(err))
     }
 }

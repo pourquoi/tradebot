@@ -1,35 +1,33 @@
+use super::StrategyAction;
 use crate::marketplace::{
-    CandleEvent, DepthEvent, MarketPlace, MarketPlaceData, MarketPlaceEvent, MarketPlaceSettings,
-    TradeEvent,
+    Marketplace, MarketplaceBook, MarketplaceCandle, MarketplaceDataApi, MarketplaceEvent,
+    MarketplaceSettingsApi, MarketplaceTrade,
 };
 use crate::order::{Order, OrderSide, OrderStatus, OrderType};
-use crate::portfolio::Portfolio;
 use crate::state::State;
-use crate::strategy::Strategy;
+use crate::strategy::{Strategy, StrategyEvent};
 use crate::ticker::Ticker;
 use crate::utils::{atr, find_price_clusters, sma, wsma};
-use anyhow::{anyhow, Context, Result};
-use chrono::DateTime;
-use clap::builder::Str;
+use crate::AppEvent;
+use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use std::usize;
+use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace};
-
-use super::StrategyAction;
 
 #[derive(Clone, Debug)]
 pub struct ScalpingStrategy<M> {
     marketplace: M,
     ticker: Ticker,
     state: Arc<RwLock<State>>,
-    trade_event_history: Arc<RwLock<VecDeque<TradeEvent>>>,
-    candle_event_history: Arc<RwLock<VecDeque<CandleEvent>>>,
+    trade_event_history: Arc<RwLock<VecDeque<MarketplaceTrade>>>,
+    candle_event_history: Arc<RwLock<VecDeque<MarketplaceCandle>>>,
     price_stats: Arc<RwLock<PriceStats>>,
     initialiazed: bool,
     params: ScalpingParams,
@@ -61,7 +59,7 @@ enum PriceTrend {
     Crash,
 }
 
-impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M> {
+impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrategy<M> {
     pub fn new(
         state: Arc<RwLock<State>>,
         marketplace: M,
@@ -105,7 +103,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
         Ok(())
     }
 
-    async fn add_trade_event_history(&mut self, event: TradeEvent) {
+    async fn add_trade_event_history(&mut self, event: MarketplaceTrade) {
         let mut history = self.trade_event_history.write().await;
 
         history.push_front(event);
@@ -114,13 +112,13 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
         }
     }
 
-    fn get_sma(&self, history: &[CandleEvent], n: usize) -> Option<Decimal> {
+    fn get_sma(&self, history: &[MarketplaceCandle], n: usize) -> Option<Decimal> {
         let price_history: Vec<Decimal> = history.iter().map(|event| event.close_price).collect();
 
         sma(&price_history, n)
     }
 
-    async fn add_candle_event_history(&mut self, event: CandleEvent) {
+    async fn add_candle_event_history(&mut self, event: MarketplaceCandle) {
         let mut history = self.candle_event_history.write().await;
 
         if let Some(last) = history.pop_front() {
@@ -130,28 +128,34 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
         }
         history.push_front(event);
 
-        if history.len() >= 500 {
+        if history.len() >= 120 {
             history.pop_back();
         }
     }
 
-    fn get_atr(&self, history: &[CandleEvent], n: usize) -> Option<Decimal> {
+    fn get_atr(&self, history: &[MarketplaceCandle], n: usize) -> Option<Decimal> {
         let price_history: Vec<(Decimal, Decimal, Decimal)> = history
-            .iter()
-            .map(|event| (event.high_price, event.low_price, event.close_price))
+            .windows(2)
+            .map(|candles| {
+                (
+                    candles[0].high_price,
+                    candles[0].low_price,
+                    candles[1].close_price,
+                )
+            })
             .collect();
 
         atr(&price_history, n)
     }
 
-    fn get_wsma(&self, history: &[CandleEvent], n: usize) -> Option<Decimal> {
+    fn get_wsma(&self, history: &[MarketplaceCandle], n: usize) -> Option<Decimal> {
         let price_history: Vec<Decimal> = history.iter().map(|event| event.close_price).collect();
         wsma(&price_history, n)
     }
 
     fn get_support(
         &self,
-        history: &[CandleEvent],
+        history: &[MarketplaceCandle],
         n: usize,
         tolerance: Decimal,
         price: Decimal,
@@ -173,7 +177,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
 
     fn get_resistance(
         &self,
-        history: &[CandleEvent],
+        history: &[MarketplaceCandle],
         n: usize,
         tolerance: Decimal,
         price: Decimal,
@@ -198,7 +202,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
 
     async fn update_stats(&self, buy_price: Decimal, sell_price: Decimal) -> Option<PriceStats> {
         let history = self.candle_event_history.read().await;
-        let history: Vec<CandleEvent> = history.iter().cloned().collect();
+        let history: Vec<MarketplaceCandle> = history.iter().cloned().collect();
 
         let wsma_120 = self.get_wsma(&history, 120)?;
         let wsma_14 = self.get_wsma(&history, 14)?;
@@ -283,7 +287,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
 
         for buy_order in buy_orders.iter() {
             let fees = self.marketplace.get_fees().await;
-            let amount = buy_order.amount * (dec!(1) - fees);
+            let amount = buy_order.filled_amount * (dec!(1) - fees);
             if !state.portfolio.check_funds(&self.ticker.base, amount) {
                 actions.push(StrategyAction::Ignore {
                     ticker: self.ticker.clone(),
@@ -310,13 +314,13 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                 Some(&buy_order),
             );
             let receive = amount * price * (dec!(1) - fees);
-            let take_profit = receive - amount * buy_order.price;
+            let take_profit = receive - buy_order.cumulative_quote_amount;
 
             if take_profit < self.params.target_profit {
-                if take_profit < self.params.target_profit * -dec!(0.5) {
-                    actions.push(StrategyAction::PlaceOrder { order });
-                    break;
-                }
+                //if take_profit < self.params.target_profit * -dec!(0.5) {
+                //    actions.push(StrategyAction::PlaceOrder { order });
+                //    break;
+                //}
                 actions.push(StrategyAction::Ignore {
                     ticker: self.ticker.clone(),
                     reason: "No profit".to_string(),
@@ -464,6 +468,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                     self.ticker.clone(),
                     amount,
                     price,
+                    amount * price,
                     current_time,
                     Some(sell_order),
                 );
@@ -499,16 +504,29 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
 
         let state = self.state.read().await;
 
+        let pending_orders = state
+            .orders
+            .iter()
+            .filter(|order| {
+                order.ticker == self.ticker
+                    && order.side == OrderSide::Buy
+                    && matches!(order.status, OrderStatus::Sent | OrderStatus::Draft)
+            })
+            .count();
+        if pending_orders > 0 {
+            return vec![];
+        }
+
         let last_order = state.get_last_executed_order(&self.ticker, None);
-        //if last_order
-        //    .map(|order| {
-        //        Duration::from_secs(3600)
-        //            > Duration::from_millis(current_time.saturating_sub(order.1.creation_time))
-        //    })
-        //    .unwrap_or(false)
-        //{
-        //    return vec![];
-        //}
+        if last_order
+            .map(|order| {
+                Duration::from_secs(3600)
+                    > Duration::from_millis(current_time.saturating_sub(order.1.creation_time))
+            })
+            .unwrap_or(false)
+        {
+            return vec![];
+        }
 
         let amount = self.params.quote_amount / current_buy_price;
         let price = current_buy_price;
@@ -528,7 +546,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                         .get(&self.ticker.quote)
                         .map(|asset| asset.amount)
                         .unwrap_or(dec!(0)),
-                    price,
+                    self.params.quote_amount,
                 )),
             }];
         }
@@ -556,10 +574,10 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
             });
         }
 
-        if stats.long_support.is_some_and(|v| v < current_buy_price) {
+        if stats.long_support.is_some_and(|v| v > current_buy_price) {
             ignores.push(StrategyAction::Ignore {
                 ticker: self.ticker.clone(),
-                reason: "Entry price < support".to_string(),
+                reason: "Entry price > support".to_string(),
                 details: None,
             });
         }
@@ -568,7 +586,14 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
             return ignores;
         }
 
-        let mut order = Order::new_buy(self.ticker.clone(), amount, price, current_time, None);
+        let mut order = Order::new_buy(
+            self.ticker.clone(),
+            amount,
+            price,
+            amount * price,
+            current_time,
+            None,
+        );
 
         match self
             .marketplace
@@ -583,9 +608,13 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
         }
     }
 
-    async fn on_depth_event(&mut self, event: &DepthEvent) -> Result<Vec<StrategyAction>> {
+    async fn on_depth_event(
+        &mut self,
+        event: &MarketplaceBook,
+        tx_app: Sender<AppEvent>,
+    ) -> Result<()> {
         if self.ticker != event.ticker {
-            return Ok(vec![StrategyAction::None]);
+            return Ok(());
         }
 
         let current_buy_price = event
@@ -608,7 +637,7 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
                         OrderStatus::Draft | OrderStatus::Sent | OrderStatus::Active
                     )
             }) {
-                return Ok(vec![]);
+                return Ok(());
             }
         }
 
@@ -620,32 +649,36 @@ impl<M: MarketPlace + MarketPlaceSettings + MarketPlaceData> ScalpingStrategy<M>
 
         actions.append(&mut self.process_entry(current_buy_price, event.time).await);
 
-        Ok(actions)
+        for action in actions {
+            tx_app.send(AppEvent::Strategy(StrategyEvent::Action(action)))?;
+        }
+
+        Ok(())
     }
 }
 
 impl<M> Strategy for ScalpingStrategy<M>
 where
-    M: MarketPlace + MarketPlaceSettings + MarketPlaceData,
+    M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi,
 {
-    async fn on_marketplace_event(
-        &mut self,
-        event: crate::marketplace::MarketPlaceEvent,
-    ) -> Result<Vec<StrategyAction>> {
-        match event {
-            MarketPlaceEvent::Candle(event) => {
-                if self.ticker == event.ticker {
-                    self.add_candle_event_history(event.clone()).await;
+    async fn start(&mut self, tx_app: Sender<AppEvent>) -> Result<Vec<StrategyAction>> {
+        let mut rx_app = tx_app.subscribe();
+        loop {
+            if let Ok(event) = rx_app.recv().await {
+                match event {
+                    AppEvent::MarketPlace(MarketplaceEvent::Candle(event)) => {
+                        if self.ticker == event.ticker {
+                            self.add_candle_event_history(event.clone()).await;
+                        }
+                    }
+                    AppEvent::MarketPlace(MarketplaceEvent::Book(event)) => {
+                        if self.ticker == event.ticker {
+                            let _ = self.on_depth_event(&event, tx_app.clone()).await;
+                        }
+                    }
+                    _ => {}
                 }
-                Ok(vec![])
             }
-            MarketPlaceEvent::Depth(event) => {
-                if self.ticker == event.ticker {
-                    return self.on_depth_event(&event).await;
-                }
-                Ok(vec![])
-            }
-            _ => Ok(vec![]),
         }
     }
 }

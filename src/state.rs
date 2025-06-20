@@ -7,6 +7,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    marketplace::MarketplaceOrderUpdate,
     order::{Order, OrderSide, OrderStatus},
     portfolio::{self, Portfolio},
     ticker::Ticker,
@@ -36,21 +37,31 @@ impl State {
         self.orders.iter_mut().find(|o| o.id == *id)
     }
 
+    pub fn update_order(&mut self, update: MarketplaceOrderUpdate) {
+        if let Some(existing) = self.find_by_id(&update.client_id) {
+            existing.update(update);
+        }
+    }
+
     pub fn add_order(&mut self, order: Order) -> Result<Order, String> {
         if order.status != OrderStatus::Draft {
             return Err(format!("Order is not a draft"));
         }
 
-        if !self.portfolio.check_funds(
-            match order.side {
-                OrderSide::Sell => &order.ticker.base,
-                OrderSide::Buy => &order.ticker.quote,
-            },
-            match order.side {
-                OrderSide::Sell => order.amount,
-                OrderSide::Buy => order.amount * order.price,
-            },
-        ) {
+        if self
+            .portfolio
+            .reserve_funds(
+                match order.side {
+                    OrderSide::Sell => &order.ticker.base,
+                    OrderSide::Buy => &order.ticker.quote,
+                },
+                match order.side {
+                    OrderSide::Sell => order.amount,
+                    OrderSide::Buy => order.amount * order.price,
+                },
+            )
+            .is_err()
+        {
             return Err(format!("Not enough funds in portfolio"));
         };
 

@@ -21,7 +21,7 @@ futures = "0.3.31"
 futures-util = { version = "0.3.31", features = ["sink"] }
 hex = "0.4.3"
 hmac = "0.12.1"
-rand = "0.9.0"
+rand = { version = "0.9.0", features = ["std"] }
 ratatui = { version = "0.29.0", features = ["all-widgets"] }
 reqwest = { version = "0.12.12", features = ["json"] }
 rust_decimal = { version = "1.36.0", features = ["serde", "serde-with-str"] }
@@ -40,3 +40,5 @@ strum = { version = "0.27.1", features = ["derive"] }
 strum_macros = "0.27.1"
 uuid = { version = "1.17.0", features = ["v4"] }
 itertools = "0.14.0"
+ed25519-dalek = { version = "2.1.1", features = ["digest", "pem", "rand_core"] }
+base64 = "0.22.1"

@@ -54,7 +54,7 @@ impl Binance {
 
             let url = format!(
                 "{}/api/v3/account?{}&signature={}",
-                ENDPOINT, params, signature
+                *ENDPOINT, params, signature
             );
 
             info!("{}", url);
