@@ -12,7 +12,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{
         Axis, Block, Borders, Cell, Chart, Dataset, List, ListItem, Paragraph, Row, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Sparkline, Table, TableState, Widget, Wrap,
+        ScrollbarOrientation, ScrollbarState, Sparkline, Table, TableState, Widget,
     },
     Frame,
 };
@@ -24,6 +24,7 @@ use std::{
 };
 use tokio::sync::mpsc::{self, Receiver};
 
+use crate::strategy::StrategyAction;
 use crate::{
     marketplace::{MarketplaceCandle, MarketplaceEvent, MarketplaceTrade},
     order::{Order, OrderSide, OrderTrade},
@@ -112,37 +113,29 @@ impl App {
                 self.portfolio.assets = portfolio
                     .assets
                     .into_iter()
-                    .filter(|asset| {
-                        self.tickers
-                            .iter()
-                            .find(|ticker| ticker.base == asset.0)
-                            .is_some()
-                    })
+                    .filter(|asset| self.tickers.iter().any(|ticker| ticker.base == asset.0))
                     .collect();
             }
             AppEvent::State(StateEvent::Orders(orders)) => {
                 self.orders = orders;
                 self.update_orders_scroll();
             }
-            AppEvent::Strategy(StrategyEvent::Action(action)) => match action {
-                crate::strategy::StrategyAction::Ignore {
-                    ticker,
-                    reason,
-                    details,
-                } => {
-                    let entry = self.last_strategy_events.entry(ticker).or_default();
-                    entry
-                        .entry(reason)
-                        .and_modify(|e| {
-                            e.0 += 1;
-                            if let Some(details) = details.clone() {
-                                e.1 = details;
-                            }
-                        })
-                        .or_insert((0, details.unwrap_or(String::new())));
-                }
-                _ => {}
-            },
+            AppEvent::Strategy(StrategyEvent::Action(StrategyAction::Ignore {
+                ticker,
+                reason,
+                details,
+            })) => {
+                let entry = self.last_strategy_events.entry(ticker).or_default();
+                entry
+                    .entry(reason)
+                    .and_modify(|e| {
+                        e.0 += 1;
+                        if let Some(details) = details.clone() {
+                            e.1 = details;
+                        }
+                    })
+                    .or_insert((0, details.unwrap_or(String::new())));
+            }
             AppEvent::MarketPlace(MarketplaceEvent::Candle(candle)) => {
                 let candles = self.candles.entry(candle.ticker.clone()).or_default();
                 if let Some(last) = candles.pop_back() {
@@ -382,7 +375,7 @@ impl App {
             .enumerate()
             .map(|(i, order)| {
                 Row::new([
-                    Cell::from(format!("{}", order.session_id.clone().unwrap_or_default())),
+                    Cell::from(order.session_id.clone().unwrap_or_default().to_string()),
                     Cell::from(
                         match order
                             .working_time
@@ -392,7 +385,7 @@ impl App {
                             _ => "-".to_string(),
                         },
                     ),
-                    Cell::from(format!("{}", order.ticker.base)).style(tailwind::BLUE.c500),
+                    Cell::from(order.ticker.base.to_string()).style(tailwind::BLUE.c500),
                     Cell::from(format!("{}", order.side)).style(Style::new().fg(
                         match order.side {
                             OrderSide::Buy => tailwind::GREEN.c500,
@@ -464,11 +457,7 @@ impl App {
             let mut assets: Vec<&String> = self.portfolio.assets.keys().collect();
             assets.sort();
 
-            let items: Vec<ListItem> = order
-                .trades
-                .iter()
-                .map(|trade| ListItem::from(trade))
-                .collect();
+            let items: Vec<ListItem> = order.trades.iter().map(ListItem::from).collect();
             let list = List::new(items).block(block);
             frame.render_widget(list, area);
         }
@@ -520,7 +509,7 @@ impl App {
                 }
             }
             None => {
-                error = Some(format!("Select an asset"));
+                error = Some("Select an asset".to_string());
             }
         }
 
@@ -590,13 +579,13 @@ impl App {
                             .reduce(f64::max)
                             .unwrap_or(0.);
 
-                        let last_close = if data_candles.len() > 0 {
+                        let last_close = if !data_candles.is_empty() {
                             data_candles[data_candles.len() - 1].1
                         } else {
                             0.
                         };
 
-                        let start_time = if data_candles.len() > 0 {
+                        let start_time = if !data_candles.is_empty() {
                             DateTime::from_timestamp_millis(data_candles[0].0 as i64)
                                 .unwrap()
                                 .format("%d %H:%M")
@@ -605,7 +594,7 @@ impl App {
                             String::from("-")
                         };
 
-                        let end_time = if data_candles.len() > 0 {
+                        let end_time = if !data_candles.is_empty() {
                             DateTime::from_timestamp_millis(
                                 data_candles[data_candles.len() - 1].0 as i64,
                             )
@@ -627,7 +616,10 @@ impl App {
                             .iter()
                             .filter(|order| order.side == OrderSide::Buy)
                             .map(|order| {
-                                (order.creation_time as f64, order.get_order_base_price().to_f64().unwrap())
+                                (
+                                    order.creation_time as f64,
+                                    order.get_order_base_price().to_f64().unwrap(),
+                                )
                             })
                             .collect();
                         let dataset_buy_orders = Dataset::default()
@@ -641,7 +633,10 @@ impl App {
                             .iter()
                             .filter(|order| order.side == OrderSide::Sell)
                             .map(|order| {
-                                (order.creation_time as f64, order.get_order_base_price().to_f64().unwrap())
+                                (
+                                    order.creation_time as f64,
+                                    order.get_order_base_price().to_f64().unwrap(),
+                                )
                             })
                             .collect();
                         let dataset_sell_orders = Dataset::default()
@@ -680,7 +675,7 @@ impl App {
                 }
             }
             None => {
-                error = Some(format!("Select an asset"));
+                error = Some("Select an asset".to_string());
             }
         }
 
@@ -709,19 +704,19 @@ impl App {
                         for (reason, (count, details)) in events.iter() {
                             items.push(ListItem::from(vec![
                                 Line::from(format!("{} ({})", reason, count)),
-                                Line::from(format!("{}", details)),
+                                Line::from(details.to_string()),
                             ]));
                         }
                         let list = List::new(items).block(block);
                         frame.render_widget(list, area);
                     }
                     None => {
-                        error = Some(format!("No events yet"));
+                        error = Some("No events yet".to_string());
                     }
                 }
             }
             None => {
-                error = Some(format!("Select an asset"));
+                error = Some("Select an asset".to_string());
             }
         }
         if let Some(error) = error {

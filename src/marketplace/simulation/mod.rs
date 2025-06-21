@@ -2,7 +2,6 @@ use crate::marketplace::{Marketplace, MarketplaceBook, MarketplaceSettingsApi};
 use crate::order::Order;
 use crate::portfolio::Asset;
 use crate::ticker::Ticker;
-use crate::AppEvent;
 use anyhow::anyhow;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -76,7 +75,7 @@ impl<S: MarketplaceSettingsApi> SimulationMarketplace<S> {
         };
     }
 
-    async fn lock_funds(&mut self, asset: &String, amount: Decimal) -> anyhow::Result<()> {
+    async fn lock_funds(&mut self, asset: &str, amount: Decimal) -> anyhow::Result<()> {
         let mut assets = self.assets.write().await;
         match assets.get_mut(asset) {
             Some(asset) => {
@@ -98,19 +97,19 @@ impl<S: MarketplaceSettingsApi> SimulationMarketplace<S> {
 
     pub async fn update_asset_amount(
         &self,
-        symbol: &String,
+        symbol: &str,
         delta: Decimal,
         current_price: Option<Decimal>,
     ) {
         let mut assets = self.assets.write().await;
         let asset = assets
-            .entry(symbol.clone())
+            .entry(symbol.to_owned())
             .and_modify(|asset| {
                 asset.amount += delta;
                 asset.value = current_price.map(|p| (asset.amount + asset.locked) * p);
             })
             .or_insert(Asset {
-                symbol: symbol.clone(),
+                symbol: symbol.to_owned(),
                 amount: delta,
                 locked: dec!(0),
                 value: current_price.map(|p| delta * p),
@@ -120,19 +119,19 @@ impl<S: MarketplaceSettingsApi> SimulationMarketplace<S> {
 
     pub async fn update_asset_locked(
         &self,
-        symbol: &String,
+        symbol: &str,
         delta: Decimal,
         current_price: Option<Decimal>,
     ) {
         let mut assets = self.assets.write().await;
         let asset = assets
-            .entry(symbol.clone())
+            .entry(symbol.to_owned())
             .and_modify(|asset| {
                 asset.locked += delta;
                 asset.value = current_price.map(|p| (asset.amount + asset.locked) * p);
             })
             .or_insert(Asset {
-                symbol: symbol.clone(),
+                symbol: symbol.to_owned(),
                 amount: dec!(0),
                 locked: delta,
                 value: current_price.map(|p| delta * p),

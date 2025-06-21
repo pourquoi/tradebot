@@ -185,7 +185,7 @@ pub struct DepthUpdateStream {
 }
 
 impl Binance {
-    pub async fn connect_stream(&self, tickers: &Vec<Ticker>, tx: Sender<AppEvent>) {
+    pub async fn connect_stream(&self, tickers: &[Ticker], tx: Sender<AppEvent>) {
         let trade_params = tickers
             .iter()
             .map(|s| format!("{}{}@trade", s.base.to_lowercase(), s.quote.to_lowercase()))
@@ -255,7 +255,7 @@ impl Binance {
                                 Ok(value) => match (value.get("data"), value.get("stream")) {
                                     (Some(value), Some(Value::String(stream))) => {
                                         match value.get("e") {
-                                            Some(Value::String(e)) if *e == "trade".to_string() => {
+                                            Some(Value::String(e)) if e == "trade" => {
                                                 match serde_json::from_value::<TradeStream>(
                                                     value.clone(),
                                                 ) {
@@ -288,7 +288,7 @@ impl Binance {
                                                     }
                                                 }
                                             }
-                                            Some(Value::String(e)) if *e == "kline".to_string() => {
+                                            Some(Value::String(e)) if e == "kline" => {
                                                 match serde_json::from_value::<KLineStream>(
                                                     value.clone(),
                                                 ) {
@@ -342,7 +342,7 @@ impl Binance {
                                                 }
                                             }
                                             Some(Value::String(e))
-                                                if *e == "depthUpdate".to_string() =>
+                                                if e == "depthUpdate" =>
                                             {
                                                 match serde_json::from_value::<DepthUpdateStream>(
                                                     value.clone(),

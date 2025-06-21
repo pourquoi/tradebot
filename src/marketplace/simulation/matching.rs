@@ -12,10 +12,7 @@ use uuid::Uuid;
 
 impl<S: MarketplaceSettingsApi> SimulationMarketplace<S> {
     async fn tick(&mut self) -> anyhow::Result<()> {
-        match self.source {
-            SimulationSource::Book => self.match_order_on_book().await?,
-            _ => {}
-        };
+        if let SimulationSource::Book = self.source { self.match_order_on_book().await? };
         Ok(())
     }
 
@@ -200,12 +197,9 @@ impl<S: MarketplaceSettingsApi> MarketplaceMatching for SimulationMarketplace<S>
                             let mut current_time = current_time.write().await;
                             *current_time = time;
                         }
-                        match event {
-                            crate::marketplace::MarketplaceEvent::Book(book) => {
-                                let mut order_book = order_book.write().await;
-                                order_book.insert(book.ticker.clone(), book);
-                            }
-                            _ => {}
+                        if let crate::marketplace::MarketplaceEvent::Book(book) = event {
+                            let mut order_book = order_book.write().await;
+                            order_book.insert(book.ticker.clone(), book);
                         }
                     }
                     Err(err) => {

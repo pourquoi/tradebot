@@ -101,7 +101,7 @@ impl<F: MarketplaceDataApi> MarketplaceDataApi for ReplayMarketplace<F> {
             let mut content = String::new();
             cache.read_to_string(&mut content).await?;
             let candles = serde_json::from_str::<Vec<MarketplaceCandle>>(content.as_str())?;
-            return Ok(candles);
+            Ok(candles)
         } else {
             let candles = self
                 .fallback
@@ -111,12 +111,13 @@ impl<F: MarketplaceDataApi> MarketplaceDataApi for ReplayMarketplace<F> {
                 let mut cache = OpenOptions::new()
                     .write(true)
                     .create(true)
+                    .truncate(true)
                     .open(cache_path)
                     .await?;
                 let content = serde_json::to_string(&candles)?;
-                cache.write(content.as_bytes()).await?;
+                cache.write_all(content.as_bytes()).await?;
             }
-            return Ok(candles);
+            Ok(candles)
         }
     }
 }

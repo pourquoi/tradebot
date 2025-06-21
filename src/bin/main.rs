@@ -111,7 +111,7 @@ async fn main() {
         }) => {
             let tickers: Vec<Ticker> = symbol
                 .iter()
-                .flat_map(|symbol| Ticker::try_from(symbol))
+                .flat_map(Ticker::try_from)
                 .collect();
             let _ = run_start(quote, tickers, replay_path, server_address, real).await;
         }
@@ -125,7 +125,7 @@ async fn main() {
         }) => {
             let tickers: Vec<Ticker> = symbol
                 .iter()
-                .flat_map(|symbol| Ticker::try_from(symbol))
+                .flat_map(Ticker::try_from)
                 .collect();
             let _ = run_replay(
                 interval,
@@ -147,7 +147,7 @@ async fn main() {
         }) => {
             let tickers: Vec<Ticker> = symbol
                 .iter()
-                .flat_map(|symbol| Ticker::try_from(symbol))
+                .flat_map(Ticker::try_from)
                 .collect();
             let _ = run_tui(quote, server_address, tickers).await;
         }
@@ -277,6 +277,7 @@ async fn run_start(
         let mut state = state.write().await;
         if real {
             state.portfolio.assets = marketplace.get_account_assets().await?;
+            state.orders = marketplace.get_orders(&tickers).await?;
         } else {
             state.portfolio.assets = simulation.get_account_assets().await?;
         }
@@ -310,8 +311,8 @@ async fn run_start(
             marketplace.clone(),
             ticker.clone(),
             ScalpingParams {
-                target_profit: dec!(3),
-                quote_amount: dec!(10),
+                target_profit: dec!(1),
+                quote_amount: dec!(100),
                 buy_cooldown: Duration::from_secs(60 * 15),
                 multiple_orders: true,
             },
@@ -422,7 +423,7 @@ async fn run_replay(
             ScalpingParams {
                 target_profit: dec!(1.5),
                 quote_amount: dec!(100),
-                buy_cooldown: Duration::from_secs(60 * 1),
+                buy_cooldown: Duration::from_secs(60),
                 multiple_orders: true,
             },
         );

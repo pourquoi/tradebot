@@ -1,6 +1,6 @@
 use std::{
     net::SocketAddr,
-    sync::{mpsc::Receiver, Arc},
+    sync::Arc,
 };
 
 use anyhow::Result;
@@ -19,7 +19,7 @@ use tokio::{
     sync::{broadcast, mpsc, RwLock},
 };
 use tower_http::trace::TraceLayer;
-use tracing::{error, info, trace};
+use tracing::info;
 
 use crate::{state::StateEvent, AppCommandEvent, AppEvent};
 

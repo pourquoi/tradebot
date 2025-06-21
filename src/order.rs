@@ -263,7 +263,7 @@ impl Order {
         self.status = update.status;
 
         if let Some(trade) = update.trade {
-            if self.trades.iter().find(|t| t.id == trade.id).is_none() {
+            if !self.trades.iter().any(|t| t.id == trade.id) {
                 self.trades.push(trade.clone());
             }
         }

@@ -3,7 +3,7 @@ use crate::marketplace::{
     Marketplace, MarketplaceBook, MarketplaceCandle, MarketplaceDataApi, MarketplaceEvent,
     MarketplaceSettingsApi, MarketplaceTrade,
 };
-use crate::order::{Order, OrderSide, OrderStatus, OrderType};
+use crate::order::{Order, OrderSide, OrderStatus};
 use crate::state::State;
 use crate::strategy::{Strategy, StrategyEvent};
 use crate::ticker::Ticker;
@@ -16,10 +16,9 @@ use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
-use std::usize;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, trace};
+use tracing::{error, info};
 
 #[derive(Clone, Debug)]
 pub struct ScalpingStrategy<M> {
@@ -311,7 +310,7 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
                 amount,
                 price,
                 current_time,
-                Some(&buy_order),
+                Some(buy_order),
             );
             let receive = amount * price * (dec!(1) - fees);
             let take_profit = receive - buy_order.cumulative_quote_amount;
@@ -428,7 +427,7 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
                     && Duration::from_millis(
                         current_time
                             .saturating_sub(state.get_session_start(session_id).unwrap_or(0)),
-                    ) > Duration::from_secs(3600 * 1)
+                    ) > Duration::from_secs(3600)
                 {
                     actions.push(StrategyAction::Ignore {
                         ticker: self.ticker.clone(),
@@ -630,7 +629,7 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
         {
             let state = self.state.read().await;
             // if there is a pending order, wait for it to be processed
-            if let Some(_) = state.orders.iter().find(|order| {
+            if state.orders.iter().any(|order| {
                 order.ticker == event.ticker
                     && matches!(
                         order.status,

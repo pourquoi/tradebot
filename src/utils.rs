@@ -1,7 +1,7 @@
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::{collections::HashMap, usize};
+use std::collections::HashMap;
 use yata::{
     core::{Method, PeriodType},
     methods::WSMA,
@@ -79,8 +79,8 @@ pub fn avg(prices: &[Decimal]) -> Option<Decimal> {
     }
 }
 
-pub fn percentiles(prices: &Vec<Decimal>) -> HashMap<u8, Decimal> {
-    let mut prices = prices.clone();
+pub fn percentiles(prices: &[Decimal]) -> HashMap<u8, Decimal> {
+    let mut prices = prices.to_owned();
     prices.sort_unstable();
     let mut percentiles: HashMap<u8, Decimal> = HashMap::new();
     let len = prices.len() as f64;
@@ -173,7 +173,7 @@ where
 }
 
 pub fn serialize_decimal_pairs<S>(
-    pairs: &Vec<(Decimal, Decimal)>,
+    pairs: &[(Decimal, Decimal)],
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where

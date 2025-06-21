@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Display};
-use tracing::info;
 
 use colored::Colorize;
 use rust_decimal::Decimal;
@@ -19,6 +18,12 @@ pub struct Asset {
 pub struct Portfolio {
     pub assets: HashMap<String, Asset>,
     pub value: Option<Decimal>,
+}
+
+impl Default for Portfolio {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Portfolio {
@@ -90,15 +95,15 @@ impl Portfolio {
         self.assets.insert(asset.symbol.clone(), asset);
     }
 
-    pub fn update_asset_amount(&mut self, symbol: &String, delta: Decimal, current_price: Decimal) {
+    pub fn update_asset_amount(&mut self, symbol: &str, delta: Decimal, current_price: Decimal) {
         self.assets
-            .entry(symbol.clone())
+            .entry(symbol.to_owned())
             .and_modify(|asset| {
                 asset.amount += delta;
                 asset.value = Some((asset.amount + asset.locked) * current_price);
             })
             .or_insert(Asset {
-                symbol: symbol.clone(),
+                symbol: symbol.to_owned(),
                 amount: delta,
                 locked: dec!(0),
                 value: Some(delta * current_price),
@@ -107,15 +112,15 @@ impl Portfolio {
         self.update_value();
     }
 
-    pub fn drain_asset_locked(&mut self, symbol: &String, drain: Decimal, current_price: Decimal) {
+    pub fn drain_asset_locked(&mut self, symbol: &str, drain: Decimal, current_price: Decimal) {
         self.assets
-            .entry(symbol.clone())
+            .entry(symbol.to_owned())
             .and_modify(|asset| {
                 asset.locked -= drain;
                 asset.value = Some((asset.amount + asset.locked) * current_price);
             })
             .or_insert(Asset {
-                symbol: symbol.clone(),
+                symbol: symbol.to_owned(),
                 amount: -drain,
                 locked: dec!(0),
                 value: Some(-drain * current_price),
@@ -128,7 +133,7 @@ impl Portfolio {
         self.value = Some(
             self.assets
                 .iter()
-                .flat_map(|(_, asset)| asset.value.map(|value| value))
+                .flat_map(|(_, asset)| asset.value)
                 .sum(),
         );
     }

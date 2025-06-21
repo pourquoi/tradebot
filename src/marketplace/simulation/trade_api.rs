@@ -5,20 +5,19 @@ use uuid::Uuid;
 use super::SimulationMarketplace;
 use crate::marketplace::{MarketplaceOrderUpdate, MarketplaceSettingsApi};
 use crate::order::OrderSide;
+use crate::ticker::Ticker;
 use crate::{
     marketplace::MarketplaceTradeApi,
     order::{Order, OrderStatus},
 };
 
 impl<S: MarketplaceSettingsApi> MarketplaceTradeApi for SimulationMarketplace<S> {
-    async fn get_orders(&self, tickers: &Vec<crate::ticker::Ticker>) -> anyhow::Result<Vec<Order>> {
+    async fn get_orders(&self, tickers: &[Ticker]) -> anyhow::Result<Vec<Order>> {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let orders = self.orders.read().await;
         let orders: Vec<Order> = orders
-            .iter()
-            .cloned()
-            .filter(|order| tickers.contains(&order.ticker))
+            .iter().filter(|&order| tickers.contains(&order.ticker)).cloned()
             .collect();
         Ok(orders.clone())
     }

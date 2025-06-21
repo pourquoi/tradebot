@@ -58,7 +58,7 @@ impl Binance {
         }
     }
 
-    pub async fn init(&mut self, tickers: &Vec<Ticker>) -> Result<()> {
+    pub async fn init(&mut self, tickers: &[Ticker]) -> Result<()> {
         let mut exchange_info = self.exchange_info.write().await;
         *exchange_info = {
             let res = self.get_exchange_info(tickers).await?;
@@ -79,7 +79,7 @@ impl MarketplaceDataStream for Binance {
         tickers: &Vec<Ticker>,
         tx: Sender<AppEvent>,
     ) -> anyhow::Result<()> {
-        self.connect_stream(&tickers, tx).await;
+        self.connect_stream(tickers, tx).await;
         Ok(())
     }
 }
@@ -201,15 +201,17 @@ impl MarketplaceAccountApi for Binance {
 }
 
 impl MarketplaceTradeApi for Binance {
-    async fn get_orders(&self, tickers: &Vec<Ticker>) -> Result<Vec<Order>> {
+    async fn get_orders(&self, tickers: &[Ticker]) -> Result<Vec<Order>> {
         let mut orders = Vec::new();
         for ticker in tickers {
             for order in self
                 .get_open_orders(ticker)
                 .await?
                 .iter()
-                .flat_map(|order| order.try_into())
-                .into_iter()
+                .flat_map(|order| order.try_into().map_err(|err| {
+                    error!("Could not convert order : {err}");
+                    anyhow::anyhow!("Could not convert order : {err}")
+                }))
             {
                 orders.push(order);
             }

@@ -1,7 +1,7 @@
+use crate::{order::Order, ticker::Ticker, AppEvent};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
-use crate::{marketplace::MarketplaceEvent, order::Order, ticker::Ticker, AppEvent};
 
 pub mod scalping;
 

@@ -1,6 +1,5 @@
-use std::{cmp::Ordering, time::Duration, usize};
+use std::{cmp::Ordering, time::Duration};
 
-use chrono::Utc;
 use itertools::Itertools;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -9,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     marketplace::MarketplaceOrderUpdate,
     order::{Order, OrderSide, OrderStatus},
-    portfolio::{self, Portfolio},
+    portfolio::Portfolio,
     ticker::Ticker,
 };
 
@@ -23,6 +22,12 @@ pub struct State {
 pub enum StateEvent {
     Portfolio(Portfolio),
     Orders(Vec<Order>),
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl State {
@@ -45,7 +50,7 @@ impl State {
 
     pub fn add_order(&mut self, order: Order) -> Result<Order, String> {
         if order.status != OrderStatus::Draft {
-            return Err(format!("Order is not a draft"));
+            return Err("Order is not a draft".to_string());
         }
 
         if self
@@ -62,11 +67,11 @@ impl State {
             )
             .is_err()
         {
-            return Err(format!("Not enough funds in portfolio"));
+            return Err("Not enough funds in portfolio".to_string());
         };
 
         if let Some(prev_order_id) = &order.prev_order_id {
-            if let Some(prev_order) = self.find_by_id(&prev_order_id) {
+            if let Some(prev_order) = self.find_by_id(prev_order_id) {
                 prev_order.next_order_id = Some(order.id.clone());
             }
         }
@@ -79,16 +84,11 @@ impl State {
     // remove non active orders older than 2 weeks
     pub fn purge_orders(&mut self, current_time: u64) -> usize {
         let prev_count = self.orders.len();
-        self.orders = self
-            .orders
-            .iter()
-            .cloned()
-            .filter(|order| {
+        self.orders.retain(|order| {
                 !matches!(order.status, OrderStatus::Active)
                     || Duration::from_millis(current_time.saturating_sub(order.creation_time))
                         > Duration::from_secs(3600 * 24 * 14)
-            })
-            .collect();
+            });
         prev_count - self.orders.len()
     }
 

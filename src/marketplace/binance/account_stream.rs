@@ -1,21 +1,19 @@
 use std::{env, time::Duration};
 
-use base64::{engine::general_purpose::URL_SAFE, prelude::BASE64_STANDARD, Engine as _};
-use chrono::{format, Utc};
+use base64::{prelude::BASE64_STANDARD, Engine as _};
+use chrono::Utc;
 use ed25519_dalek::{
-    ed25519::{signature::SignerMut, SignatureBytes},
-    pkcs8::DecodePrivateKey,
-    Signature, SigningKey, Verifier, VerifyingKey,
+    ed25519::signature::SignerMut,
+    pkcs8::DecodePrivateKey, SigningKey,
 };
 use futures::SinkExt;
 use futures_util::StreamExt;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::{fs, select, sync::broadcast::Sender, time::interval};
 use tokio_tungstenite::connect_async;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use tungstenite::Message;
 
 use crate::{
@@ -23,9 +21,8 @@ use crate::{
         binance::WS_ENDPOINT, MarketplaceAccountStream, MarketplaceEvent, MarketplaceOrderUpdate,
         MarketplacePortfolioUpdate,
     },
-    order::{Order, OrderSide, OrderStatus, OrderTrade, OrderType},
+    order::{OrderStatus, OrderTrade},
     portfolio::Asset,
-    ticker::Ticker,
     AppEvent,
 };
 
@@ -195,7 +192,7 @@ async fn subscribe(
 
 impl MarketplaceAccountStream for Binance {
     async fn start_account_stream(&mut self, tx_app: Sender<AppEvent>) -> anyhow::Result<()> {
-        let request = format!("{}", *WS_ENDPOINT);
+        let request = (*WS_ENDPOINT).to_string();
 
         loop {
             let mut ws_stream;
@@ -225,8 +222,6 @@ impl MarketplaceAccountStream for Binance {
             let mut req_id = 0_u64;
             let mut logon_request_id = 0;
             let mut subscribe_request_id = 0;
-            let mut loggedin = false;
-            let mut subscribed = false;
 
             let mut last_logon_attempt = Utc::now().timestamp_millis() as u64;
             logon(&mut ws_stream, req_id).await?;
@@ -245,14 +240,13 @@ impl MarketplaceAccountStream for Binance {
                     message = ws_stream.next() => {
                         match message {
                             Some(Ok(Message::Text(text))) => {
-                                info!("{:?}", text);
+                                debug!("{:?}", text);
                                 let now = Utc::now().timestamp_millis() as u64;
                                 let parsed: Value = serde_json::from_str(&text)?;
                                 if let Some(result) = parsed.get("result") {
                                     if let Some(Value::Number(res_id)) = parsed.get("id") {
                                         if res_id.as_u64() == Some(logon_request_id) {
-                                            if let Some(Value::Number(authorizedSince)) = result.get("authorizedSince") {
-                                                loggedin = true;
+                                            if let Some(Value::Number(_authorized_since)) = result.get("authorizedSince") {
                                                 if let Some(Value::Bool(subscribed)) = result.get("userDataStream") {
                                                     if !subscribed {
                                                         subscribe_request_id = req_id;
@@ -263,7 +257,6 @@ impl MarketplaceAccountStream for Binance {
                                             }
                                         }
                                         else if res_id.as_u64() == Some(subscribe_request_id) {
-                                            subscribed = true;
                                             let account_msg = json!({
                                                 "id": req_id,
                                                 "method": "account.status",
@@ -275,17 +268,14 @@ impl MarketplaceAccountStream for Binance {
                                             ws_stream.send(Message::Text(account_msg.to_string().into())).await?;
                                             req_id += 1;
                                         }
-                                        else {
-                                            if let Some(Value::Null) = result.get("authorizedSince") {
-                                                loggedin = false;
-                                                if Duration::from_millis(now.saturating_sub(last_logon_attempt)) > Duration::from_secs(60) {
-                                                    logon_request_id = req_id;
-                                                    last_logon_attempt = now;
-                                                    logon(&mut ws_stream, req_id).await?;
-                                                    req_id += 1;
-                                                } else {
-                                                    info!("Too early to login");
-                                                }
+                                        else if let Some(Value::Null) = result.get("authorizedSince") {
+                                            if Duration::from_millis(now.saturating_sub(last_logon_attempt)) > Duration::from_secs(60) {
+                                                logon_request_id = req_id;
+                                                last_logon_attempt = now;
+                                                logon(&mut ws_stream, req_id).await?;
+                                                req_id += 1;
+                                            } else {
+                                                info!("Too early to login");
                                             }
                                         }
                                     }

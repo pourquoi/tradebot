@@ -219,7 +219,7 @@ pub trait MarketplaceAccountApi {
 pub trait MarketplaceTradeApi {
     fn get_orders(
         &self,
-        tickers: &Vec<Ticker>,
+        tickers: &[Ticker],
     ) -> impl std::future::Future<Output = Result<Vec<Order>>>;
 
     fn place_order(&mut self, order: &Order) -> impl std::future::Future<Output = Result<Order>>;
