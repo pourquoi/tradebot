@@ -10,6 +10,15 @@ pub enum StrategyEvent {
     Action(StrategyAction),
 }
 
+pub enum StrategyStatus {
+    New,
+    Initializing,
+    Running,
+    Paused,
+    Stopping,
+    Stopped
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum StrategyAction {
     None,
@@ -37,5 +46,5 @@ pub trait Strategy {
     fn start(
         &mut self,
         tx_app: Sender<AppEvent>,
-    ) -> impl std::future::Future<Output = Result<Vec<StrategyAction>>>;
+    ) -> impl std::future::Future<Output = ()>;
 }

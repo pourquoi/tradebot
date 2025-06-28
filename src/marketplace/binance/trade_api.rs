@@ -85,8 +85,10 @@ impl TryFrom<&OrderResponse> for Order {
             sell_order_price: None,
             marketplace_id: Some(value.order_id.to_string()),
             session_id: None,
+            strategy: None,
             next_order_id: None,
             prev_order_id: None,
+            reject_reason: None
         };
 
         order.trades = value

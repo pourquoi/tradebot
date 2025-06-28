@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 impl<S: MarketplaceSettingsApi> SimulationMarketplace<S> {
     async fn tick(&mut self) -> anyhow::Result<()> {
-        if let SimulationSource::Book = self.source { self.match_order_on_book().await? };
+        if let SimulationSource::Book = self.source {
+            self.match_order_on_book().await?
+        };
         Ok(())
     }
 
@@ -33,10 +35,13 @@ impl<S: MarketplaceSettingsApi> SimulationMarketplace<S> {
                 };
 
                 for book_order in book {
-                    let trade = match order.order_type {
-                        OrderType::Market => {
+                    if !matches!(order.status, OrderStatus::Active) {
+                        break;
+                    }
+                    let trade = match (order.side, order.order_type) {
+                        (OrderSide::Buy, OrderType::Market) => {
                             let to_fulfill_quote =
-                                order.amount * order.price - order.get_trade_total_price();
+                                order.quote_amount - order.cumulative_quote_amount;
                             if to_fulfill_quote <= dec!(0) {
                                 break;
                             }
@@ -50,19 +55,45 @@ impl<S: MarketplaceSettingsApi> SimulationMarketplace<S> {
                                     price: book_order.0,
                                 }
                             } else {
-                                let taken = to_fulfill_quote / book_order.0;
-                                order.filled_amount += taken;
-                                order.cumulative_quote_amount += taken * book_order.0;
+                                let eaten = to_fulfill_quote / book_order.0;
+                                order.filled_amount += eaten;
+                                order.cumulative_quote_amount += to_fulfill_quote;
                                 order.status = OrderStatus::Executed;
                                 OrderTrade {
                                     id: Uuid::new_v4().to_string(),
                                     trade_time: time,
-                                    amount: taken,
+                                    amount: eaten,
                                     price: book_order.0,
                                 }
                             }
                         }
-                        OrderType::Limit => {
+                        (OrderSide::Sell, OrderType::Market) => {
+                            let to_fulfill = order.amount - order.filled_amount;
+                            if to_fulfill <= dec!(0) {
+                                break;
+                            }
+                            if to_fulfill > book_order.1 {
+                                order.filled_amount += book_order.1;
+                                order.cumulative_quote_amount += book_order.1 * book_order.0;
+                                OrderTrade {
+                                    id: Uuid::new_v4().to_string(),
+                                    trade_time: time,
+                                    amount: book_order.1,
+                                    price: book_order.0,
+                                }
+                            } else {
+                                order.filled_amount += to_fulfill;
+                                order.cumulative_quote_amount += to_fulfill * book_order.0;
+                                order.status = OrderStatus::Executed;
+                                OrderTrade {
+                                    id: Uuid::new_v4().to_string(),
+                                    trade_time: time,
+                                    amount: to_fulfill,
+                                    price: book_order.0,
+                                }
+                            }
+                        }
+                        (_, OrderType::Limit) => {
                             match order.side {
                                 OrderSide::Buy => {
                                     if book_order.0 > order.price {
@@ -105,7 +136,9 @@ impl<S: MarketplaceSettingsApi> SimulationMarketplace<S> {
                             continue;
                         }
                     };
+
                     order.trades.push(trade.clone());
+
                     self.notify_order_update(MarketplaceOrderUpdate {
                         time,
                         update_type: "TRADE".to_owned(),
@@ -116,6 +149,7 @@ impl<S: MarketplaceSettingsApi> SimulationMarketplace<S> {
                         trade: Some(trade.clone()),
                     })
                     .await;
+
                     info!(
                         " {} for order {} {}/{} : +{}",
                         match order.side {

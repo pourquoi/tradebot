@@ -173,12 +173,15 @@ pub struct Order {
     pub sell_order_price: Option<Decimal>,
     pub buy_order_price: Option<Decimal>,
 
+    pub strategy: Option<String>,
     pub session_id: Option<String>,
 
     pub next_order_id: Option<String>,
     pub prev_order_id: Option<String>,
 
     pub profit: Decimal,
+    
+    pub reject_reason: Option<String>,
 }
 
 impl Order {
@@ -187,6 +190,15 @@ impl Order {
             self.cumulative_quote_amount / self.filled_amount
         } else {
             self.price
+        }
+    }
+    
+    pub fn get_filled_ratio(&self) -> Decimal {
+        match (self.side, self.order_type) {
+            (OrderSide::Buy, OrderType::Market) => {
+                self.cumulative_quote_amount.checked_div(self.quote_amount).unwrap_or(dec!(0))
+            },
+            (_, _) => self.filled_amount.checked_div(self.amount).unwrap_or(dec!(0)),
         }
     }
     
@@ -222,6 +234,8 @@ impl Order {
                 .unwrap_or(Some(Uuid::new_v4().to_string())),
             next_order_id: None,
             prev_order_id: sell_order.map(|sell_order| sell_order.id.clone()),
+            reject_reason: None,
+            strategy: sell_order.and_then(|sell_order| sell_order.strategy.clone())
         }
     }
 
@@ -252,8 +266,10 @@ impl Order {
             sell_order_price: None,
             trades: Vec::new(),
             session_id: buy_order.and_then(|buy_order| buy_order.session_id.clone()),
+            strategy: buy_order.and_then(|buy_order| buy_order.strategy.clone()),
             next_order_id: None,
             prev_order_id: buy_order.map(|buy_order| buy_order.id.clone()),
+            reject_reason: None
         }
     }
 
@@ -265,6 +281,8 @@ impl Order {
         if let Some(trade) = update.trade {
             if !self.trades.iter().any(|t| t.id == trade.id) {
                 self.trades.push(trade.clone());
+                self.cumulative_quote_amount += trade.price * trade.amount;
+                self.filled_amount += trade.amount;
             }
         }
     }

@@ -23,11 +23,11 @@ pub struct ReplayMarketplace<F> {
 }
 
 impl<F: MarketplaceSettingsApi + MarketplaceDataApi> ReplayMarketplace<F> {
-    pub fn new(data_path: PathBuf, fallback: F) -> Self {
+    pub fn new(data_path: PathBuf, fallback: F, read_interval: u64) -> Self {
         Self {
             data_path,
             paused: Arc::new(RwLock::new(false)),
-            read_interval: 1,
+            read_interval,
             fallback,
         }
     }

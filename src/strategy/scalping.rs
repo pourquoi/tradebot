@@ -4,7 +4,7 @@ use crate::marketplace::{
     MarketplaceSettingsApi, MarketplaceTrade,
 };
 use crate::order::{Order, OrderSide, OrderStatus};
-use crate::state::State;
+use crate::state::{OrderListFilters, OrderListSort, OrderListSortBy, State};
 use crate::strategy::{Strategy, StrategyEvent};
 use crate::ticker::Ticker;
 use crate::utils::{atr, find_price_clusters, sma, wsma};
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 #[derive(Clone, Debug)]
 pub struct ScalpingStrategy<M> {
@@ -28,7 +28,7 @@ pub struct ScalpingStrategy<M> {
     trade_event_history: Arc<RwLock<VecDeque<MarketplaceTrade>>>,
     candle_event_history: Arc<RwLock<VecDeque<MarketplaceCandle>>>,
     price_stats: Arc<RwLock<PriceStats>>,
-    initialiazed: bool,
+    initialized: bool,
     params: ScalpingParams,
 }
 
@@ -36,8 +36,10 @@ pub struct ScalpingStrategy<M> {
 pub struct ScalpingParams {
     pub target_profit: Decimal,
     pub quote_amount: Decimal,
-    pub buy_cooldown: Duration,
-    pub multiple_orders: bool,
+    pub entry_delay: Duration,
+    pub reentry_delay: Duration,
+    pub session_count: u8,
+    pub session_profit_lifetime: Duration,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -73,12 +75,12 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
             price_stats: Arc::from(RwLock::from(PriceStats::default())),
             params,
             marketplace,
-            initialiazed: false,
+            initialized: false,
         }
     }
 
     pub async fn init(&mut self, start_time: Option<u64>) -> Result<()> {
-        if self.initialiazed {
+        if self.initialized {
             return Ok(());
         }
 
@@ -97,7 +99,7 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
         );
         *history = VecDeque::from(candles);
 
-        self.initialiazed = true;
+        self.initialized = true;
 
         Ok(())
     }
@@ -118,17 +120,26 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
     }
 
     async fn add_candle_event_history(&mut self, event: MarketplaceCandle) {
-        let mut history = self.candle_event_history.write().await;
+        let mut update_stats = false;
+        {
+            let mut history = self.candle_event_history.write().await;
 
-        if let Some(last) = history.pop_front() {
-            if last.start_time != event.start_time {
-                history.push_front(last);
+            if let Some(last) = history.pop_front() {
+                if last.start_time != event.start_time {
+                    history.push_front(last);
+                    update_stats = true;
+                }
+            }
+            history.push_front(event.clone());
+
+            if history.len() >= 120 {
+                history.pop_back();
             }
         }
-        history.push_front(event);
 
-        if history.len() >= 120 {
-            history.pop_back();
+        if update_stats {
+            self.update_stats(event.close_price, event.close_price)
+                .await;
         }
     }
 
@@ -267,24 +278,24 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
         current_time: u64,
     ) -> Vec<StrategyAction> {
         let state = self.state.read().await;
-        let mut buy_orders: Vec<&Order> = state
-            .orders
-            .iter()
-            .filter(|order| {
-                order.ticker == self.ticker
-                    && order.side == OrderSide::Buy
-                    && matches!(order.status, OrderStatus::Executed)
-                    && order.next_order_id.is_none()
-            })
-            .collect();
-        buy_orders.sort_by(|a, b| match (&a.working_time, &b.working_time) {
-            (Some(ts_a), Some(ts_b)) => ts_a.cmp(ts_b),
-            _ => Ordering::Equal,
-        });
+
+        let last_buy_orders = state.find_by(
+            OrderListFilters {
+                ticker: Some(self.ticker.clone()),
+                side: Some(OrderSide::Buy),
+                status: vec![OrderStatus::Executed],
+                has_child: Some(false),
+                ..Default::default()
+            },
+            OrderListSort {
+                by: OrderListSortBy::Date,
+                asc: false,
+            },
+        );
 
         let mut actions: Vec<StrategyAction> = Vec::new();
 
-        for buy_order in buy_orders.iter() {
+        for buy_order in last_buy_orders.iter() {
             let fees = self.marketplace.get_fees().await;
             let amount = buy_order.filled_amount * (dec!(1) - fees);
             if !state.portfolio.check_funds(&self.ticker.base, amount) {
@@ -356,50 +367,46 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
         current_time: u64,
     ) -> Vec<StrategyAction> {
         if current_buy_price <= dec!(0) {
-            error!(
-                "Something went wrong : current_buy_price is 0 for {}",
-                self.ticker
-            );
+            error!("Invalid current buy price for {}", self.ticker);
             return vec![];
         }
 
         let state = self.state.read().await;
 
-        let last_buy_order = state.get_last_executed_order(&self.ticker, Some(OrderSide::Buy));
-        if last_buy_order
-            .map(|order| {
-                Duration::from_millis(current_time.saturating_sub(order.1.creation_time))
-                    < self.params.buy_cooldown
-            })
-            .unwrap_or(false)
-        {
-            return vec![StrategyAction::Ignore {
-                ticker: self.ticker.clone(),
-                reason: "Reentry delay".to_string(),
-                details: None,
-            }];
-        }
-
-        let mut sell_orders: Vec<&Order> = state
-            .orders
-            .iter()
-            .filter(|order| {
-                order.ticker == self.ticker
-                    && order.side == OrderSide::Sell
-                    && matches!(order.status, OrderStatus::Executed)
-                    && order.next_order_id.is_none()
-            })
-            .collect();
-
-        sell_orders.sort_by(|a, b| match (&a.working_time, &b.working_time) {
-            (Some(ts_a), Some(ts_b)) => ts_b.cmp(ts_a),
-            _ => Ordering::Equal,
-        });
+        let last_sell_orders = state.find_by(
+            OrderListFilters {
+                ticker: Some(self.ticker.clone()),
+                side: Some(OrderSide::Sell),
+                has_child: Some(false),
+                status: vec![
+                    OrderStatus::Executed,
+                    OrderStatus::Active,
+                    OrderStatus::Sent,
+                    OrderStatus::Draft,
+                ],
+                ..Default::default()
+            },
+            OrderListSort {
+                by: OrderListSortBy::Date,
+                asc: false,
+            },
+        );
 
         let mut actions: Vec<StrategyAction> = Vec::new();
-        for sell_order in sell_orders.iter() {
+        for sell_order in last_sell_orders.iter() {
             let amount = self.params.quote_amount / current_buy_price;
             let price = current_buy_price;
+
+            if self.params.reentry_delay
+                > Duration::from_millis(current_time.saturating_sub(sell_order.creation_time))
+            {
+                actions.push(StrategyAction::Ignore {
+                    ticker: self.ticker.clone(),
+                    reason: "Reentry delay".to_string(),
+                    details: None,
+                });
+                continue;
+            }
 
             if !state
                 .portfolio
@@ -419,6 +426,7 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
                         price,
                     )),
                 });
+                continue;
             }
 
             if let Some(session_id) = &sell_order.session_id {
@@ -427,7 +435,7 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
                     && Duration::from_millis(
                         current_time
                             .saturating_sub(state.get_session_start(session_id).unwrap_or(0)),
-                    ) > Duration::from_secs(3600)
+                    ) > self.params.session_profit_lifetime
                 {
                     actions.push(StrategyAction::Ignore {
                         ticker: self.ticker.clone(),
@@ -494,16 +502,13 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
         current_time: u64,
     ) -> Vec<StrategyAction> {
         if current_buy_price <= dec!(0) {
-            error!(
-                "Something went wrong : current_buy_price is 0 for {}",
-                self.ticker
-            );
+            error!("Invalid current buy price for {}", self.ticker);
             return vec![];
         }
 
         let state = self.state.read().await;
 
-        let pending_orders = state
+        let pending_buy_orders = state
             .orders
             .iter()
             .filter(|order| {
@@ -512,19 +517,22 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
                     && matches!(order.status, OrderStatus::Sent | OrderStatus::Draft)
             })
             .count();
-        if pending_orders > 0 {
+
+        if pending_buy_orders > 0 {
+            debug!("Pending buy orders: skipping entry");
             return vec![];
         }
 
-        let last_order = state.get_last_executed_order(&self.ticker, None);
-        if last_order
-            .map(|order| {
-                Duration::from_secs(3600)
-                    > Duration::from_millis(current_time.saturating_sub(order.1.creation_time))
-            })
-            .unwrap_or(false)
-        {
-            return vec![];
+        if let Some(last_order_time) = state.get_last_executed_order_time(OrderListFilters {
+            ticker: Some(self.ticker.clone()),
+            ..Default::default()
+        }) {
+            if self.params.entry_delay
+                > Duration::from_millis(current_time.saturating_sub(last_order_time))
+            {
+                debug!("Last order too recent: skipping entry");
+                return vec![];
+            }
         }
 
         let amount = self.params.quote_amount / current_buy_price;
@@ -550,7 +558,9 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
             }];
         }
 
-        if state.get_active_sessions(current_time, &Duration::from_secs(3600)) > 4 {
+        if state.get_active_sessions(&self.ticker, current_time, &Duration::from_secs(3600))
+            >= self.params.session_count.into()
+        {
             return vec![StrategyAction::Ignore {
                 ticker: self.ticker.clone(),
                 reason: "Entry max sessions".to_string(),
@@ -618,24 +628,29 @@ impl<M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi> ScalpingStrat
 
         let current_buy_price = event
             .buy_price()
-            .context(format!("Missing buy price for {}.", event.ticker))?;
+            .context(format!("Current buy price missing for {}.", event.ticker))?;
+
         let current_sell_price = event
             .sell_price()
-            .context(format!("Missing buy price for {}.", event.ticker))?;
-
-        self.update_stats(current_buy_price, current_sell_price)
-            .await;
+            .context(format!("Current sell price missing for {}.", event.ticker))?;
 
         {
             let state = self.state.read().await;
             // if there is a pending order, wait for it to be processed
-            if state.orders.iter().any(|order| {
-                order.ticker == event.ticker
-                    && matches!(
-                        order.status,
-                        OrderStatus::Draft | OrderStatus::Sent | OrderStatus::Active
-                    )
-            }) {
+            if !state
+                .find_by(
+                    OrderListFilters {
+                        ticker: Some(self.ticker.clone()),
+                        status: vec![OrderStatus::Draft, OrderStatus::Sent, OrderStatus::Active],
+                        ..Default::default()
+                    },
+                    OrderListSort {
+                        by: OrderListSortBy::Date,
+                        asc: true,
+                    },
+                )
+                .is_empty()
+            {
                 return Ok(());
             }
         }
@@ -660,7 +675,7 @@ impl<M> Strategy for ScalpingStrategy<M>
 where
     M: Marketplace + MarketplaceSettingsApi + MarketplaceDataApi,
 {
-    async fn start(&mut self, tx_app: Sender<AppEvent>) -> Result<Vec<StrategyAction>> {
+    async fn start(&mut self, tx_app: Sender<AppEvent>) {
         let mut rx_app = tx_app.subscribe();
         loop {
             if let Ok(event) = rx_app.recv().await {

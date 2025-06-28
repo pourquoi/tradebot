@@ -1,3 +1,5 @@
+use std::iter::Filter;
+use std::slice::Iter;
 use std::{cmp::Ordering, time::Duration};
 
 use itertools::Itertools;
@@ -5,6 +7,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
+use crate::order::OrderType;
 use crate::{
     marketplace::MarketplaceOrderUpdate,
     order::{Order, OrderSide, OrderStatus},
@@ -30,6 +33,25 @@ impl Default for State {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct OrderListFilters {
+    pub ticker: Option<Ticker>,
+    pub status: Vec<OrderStatus>,
+    pub side: Option<OrderSide>,
+    pub session: Option<String>,
+    pub strategy: Option<String>,
+    pub has_child: Option<bool>,
+}
+
+pub struct OrderListSort {
+    pub by: OrderListSortBy,
+    pub asc: bool,
+}
+
+pub enum OrderListSortBy {
+    Date,
+}
+
 impl State {
     pub fn new() -> Self {
         Self {
@@ -48,27 +70,28 @@ impl State {
         }
     }
 
-    pub fn add_order(&mut self, order: Order) -> Result<Order, String> {
+    pub fn add_order(&mut self, order: Order) -> anyhow::Result<Order> {
         if order.status != OrderStatus::Draft {
-            return Err("Order is not a draft".to_string());
+            anyhow::bail!("Order status is not Draft");
         }
 
-        if self
-            .portfolio
-            .reserve_funds(
-                match order.side {
-                    OrderSide::Sell => &order.ticker.base,
-                    OrderSide::Buy => &order.ticker.quote,
-                },
-                match order.side {
-                    OrderSide::Sell => order.amount,
-                    OrderSide::Buy => order.amount * order.price,
-                },
-            )
-            .is_err()
-        {
-            return Err("Not enough funds in portfolio".to_string());
-        };
+        match (order.side, order.order_type) {
+            (OrderSide::Buy, OrderType::Market) => {
+                self.portfolio
+                    .reserve_funds(&order.ticker.quote, order.quote_amount)?;
+            }
+            (OrderSide::Buy, OrderType::Limit) => {
+                self.portfolio
+                    .reserve_funds(&order.ticker.quote, order.amount)?;
+            }
+            (OrderSide::Sell, OrderType::Market | OrderType::Limit) => {
+                self.portfolio
+                    .reserve_funds(&order.ticker.base, order.amount)?;
+            }
+            _ => {
+                anyhow::bail!("Order type not supported");
+            }
+        }
 
         if let Some(prev_order_id) = &order.prev_order_id {
             if let Some(prev_order) = self.find_by_id(prev_order_id) {
@@ -85,20 +108,29 @@ impl State {
     pub fn purge_orders(&mut self, current_time: u64) -> usize {
         let prev_count = self.orders.len();
         self.orders.retain(|order| {
-                !matches!(order.status, OrderStatus::Active)
-                    || Duration::from_millis(current_time.saturating_sub(order.creation_time))
-                        > Duration::from_secs(3600 * 24 * 14)
-            });
+            !matches!(order.status, OrderStatus::Active)
+                || Duration::from_millis(current_time.saturating_sub(order.creation_time))
+                    > Duration::from_secs(3600 * 24 * 14)
+        });
         prev_count - self.orders.len()
     }
 
-    pub fn get_active_sessions(&self, current_time: u64, session_lifetime: &Duration) -> usize {
+    pub fn get_active_sessions(
+        &self,
+        ticker: &Ticker,
+        current_time: u64,
+        session_lifetime: &Duration,
+    ) -> usize {
         let mut sessions: Vec<String> = self
             .orders
             .iter()
             .filter(|order| {
-                Duration::from_millis(current_time.saturating_sub(order.creation_time))
-                    < *session_lifetime
+                order.ticker == *ticker
+                    && (Duration::from_millis(current_time.saturating_sub(order.creation_time))
+                        < *session_lifetime
+                        || (matches!(order.status, OrderStatus::Executed)
+                            && order.side == OrderSide::Buy
+                            && order.next_order_id.is_none()))
             })
             .flat_map(|order| order.session_id.clone())
             .collect();
@@ -128,42 +160,81 @@ impl State {
             .min()
     }
 
-    pub fn get_first_executed_order(
-        &self,
-        ticker: &Ticker,
-        order_type: Option<OrderSide>,
-    ) -> Option<(usize, &Order)> {
-        self.orders
-            .iter()
-            .enumerate()
-            .filter(|(_i, order)| {
-                order.ticker == *ticker
-                    && order_type.is_none_or(|t| t == order.side)
-                    && matches!(order.status, OrderStatus::Executed)
-            })
-            .min_by(|a, b| match (&a.1.working_time, &b.1.working_time) {
-                (Some(ts_a), Some(ts_b)) => ts_a.cmp(ts_b),
-                _ => Ordering::Equal,
-            })
+    fn get_filter_iterator<'a>(
+        &'a self,
+        filters: OrderListFilters,
+    ) -> impl Iterator<Item = &'a Order> + 'a {
+        self.orders.iter().filter(move |order| {
+            if let Some(ticker) = &filters.ticker {
+                if order.ticker != *ticker {
+                    return false;
+                }
+            }
+
+            if let Some(side) = &filters.side {
+                if order.side != *side {
+                    return false;
+                }
+            }
+
+            if !&filters.status.is_empty() {
+                if !&filters.status.contains(&order.status) {
+                    return false;
+                }
+            }
+
+            if let Some(has_child) = &filters.has_child {
+                if order.next_order_id.is_some() != *has_child {
+                    return false;
+                }
+            }
+
+            return true;
+        })
     }
 
-    pub fn get_last_executed_order(
-        &self,
-        ticker: &Ticker,
-        order_type: Option<OrderSide>,
-    ) -> Option<(usize, &Order)> {
-        self.orders
-            .iter()
-            .enumerate()
-            .filter(|(_i, order)| {
-                order.ticker == *ticker
-                    && order_type.is_none_or(|t| t == order.side)
-                    && matches!(order.status, OrderStatus::Executed)
-            })
-            .max_by(|a, b| match (&a.1.working_time, &b.1.working_time) {
-                (Some(ts_a), Some(ts_b)) => ts_a.cmp(ts_b),
+    pub fn find_by(&self, filters: OrderListFilters, sort: OrderListSort) -> Vec<Order> {
+        let mut orders: Vec<Order> = self.get_filter_iterator(filters).cloned().collect();
+        orders.sort_by(|a, b| match sort.by {
+            OrderListSortBy::Date => match (a.working_time, b.working_time) {
+                (Some(ts_a), Some(ts_b)) => {
+                    if sort.asc {
+                        ts_a.cmp(&ts_b)
+                    } else {
+                        ts_b.cmp(&ts_a)
+                    }
+                }
                 _ => Ordering::Equal,
-            })
+            },
+        });
+        orders
+    }
+
+    pub fn find_one(&self, filters: OrderListFilters, sort: OrderListSort) -> Option<&Order> {
+        let it = self.get_filter_iterator(filters);
+        it.min_by(|a, b| match sort.by {
+            OrderListSortBy::Date => match (a.working_time, b.working_time) {
+                (Some(ts_a), Some(ts_b)) => {
+                    if sort.asc {
+                        ts_a.cmp(&ts_b)
+                    } else {
+                        ts_b.cmp(&ts_a)
+                    }
+                }
+                _ => Ordering::Equal,
+            },
+        })
+    }
+
+    pub fn get_last_executed_order_time(&self, filters: OrderListFilters) -> Option<u64> {
+        self.find_one(
+            filters,
+            OrderListSort {
+                by: OrderListSortBy::Date,
+                asc: false,
+            },
+        )
+        .and_then(|order| order.working_time)
     }
 
     pub fn get_total_scalped(&self, base_asset: String) -> Decimal {

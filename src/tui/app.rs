@@ -115,6 +115,7 @@ impl App {
                     .into_iter()
                     .filter(|asset| self.tickers.iter().any(|ticker| ticker.base == asset.0))
                     .collect();
+                self.portfolio.update_value();
             }
             AppEvent::State(StateEvent::Orders(orders)) => {
                 self.orders = orders;
@@ -282,7 +283,7 @@ impl App {
             Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(left_area);
 
         let [top_right_area, bottom_right_area] =
-            Layout::vertical([Constraint::Percentage(60), Constraint::Fill(1)]).areas(right_area);
+            Layout::vertical([Constraint::Percentage(40), Constraint::Fill(1)]).areas(right_area);
 
         self.render_header(frame, header_area);
         self.render_footer(frame, footer_area);
@@ -359,7 +360,7 @@ impl App {
             "Type",
             "Status",
             "Value",
-            "Fullfilled",
+            "Fulfilled",
             "Price",
             "Amount",
         ]
@@ -396,7 +397,7 @@ impl App {
                     Cell::from(format!("{}", order.cumulative_quote_amount)),
                     Cell::from(format!(
                         "{}%",
-                        (dec!(100) * order.filled_amount / order.amount).round_dp(2)
+                        (dec!(100) * order.get_filled_ratio()).round_dp(2)
                     )),
                     Cell::from(format!("{}", order.get_order_base_price())),
                     Cell::from(format!("{}", order.amount)),
@@ -456,8 +457,21 @@ impl App {
 
             let mut assets: Vec<&String> = self.portfolio.assets.keys().collect();
             assets.sort();
-
-            let items: Vec<ListItem> = order.trades.iter().map(ListItem::from).collect();
+            let mut items: Vec<ListItem> = Vec::new();
+            items.push(ListItem::from(format!(
+                "s: {}",
+                order.session_id.clone().unwrap_or("?".to_string())
+            )));
+            items.push(ListItem::from(format!(
+                "p: {}",
+                order.prev_order_id.clone().unwrap_or("?".to_string())
+            )));
+            items.push(ListItem::from(format!(
+                "n: {}",
+                order.next_order_id.clone().unwrap_or("?".to_string())
+            )));
+            let mut trade_items: Vec<ListItem> = order.trades.iter().map(ListItem::from).collect();
+            items.append(&mut trade_items);
             let list = List::new(items).block(block);
             frame.render_widget(list, area);
         }

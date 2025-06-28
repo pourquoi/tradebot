@@ -34,14 +34,14 @@ impl Portfolio {
         }
     }
 
-    pub fn update_asset_value(&mut self, symbol: &String, price: Decimal) {
+    pub fn update_asset_value(&mut self, symbol: &str, price: Decimal) {
         if let Some(asset) = self.assets.get_mut(symbol) {
             asset.value = Some((asset.locked + asset.amount) * price);
             self.update_value();
         }
     }
 
-    pub fn check_funds(&self, asset: &String, required_amount: Decimal) -> bool {
+    pub fn check_funds(&self, asset: &str, required_amount: Decimal) -> bool {
         match self.assets.get(asset) {
             Some(asset) => asset.amount >= required_amount,
             None => false,

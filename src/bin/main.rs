@@ -67,7 +67,7 @@ enum Commands {
         replay_path: PathBuf,
         #[arg(long, default_value = "USDC")]
         quote: String,
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "500")]
         interval: u64,
     },
     Tui {
@@ -109,10 +109,7 @@ async fn main() {
             server_address,
             real,
         }) => {
-            let tickers: Vec<Ticker> = symbol
-                .iter()
-                .flat_map(Ticker::try_from)
-                .collect();
+            let tickers: Vec<Ticker> = symbol.iter().flat_map(Ticker::try_from).collect();
             let _ = run_start(quote, tickers, replay_path, server_address, real).await;
         }
         Some(Commands::Replay {
@@ -123,10 +120,7 @@ async fn main() {
             server_address,
             no_server,
         }) => {
-            let tickers: Vec<Ticker> = symbol
-                .iter()
-                .flat_map(Ticker::try_from)
-                .collect();
+            let tickers: Vec<Ticker> = symbol.iter().flat_map(Ticker::try_from).collect();
             let _ = run_replay(
                 interval,
                 quote,
@@ -145,10 +139,7 @@ async fn main() {
             quote,
             server_address,
         }) => {
-            let tickers: Vec<Ticker> = symbol
-                .iter()
-                .flat_map(Ticker::try_from)
-                .collect();
+            let tickers: Vec<Ticker> = symbol.iter().flat_map(Ticker::try_from).collect();
             let _ = run_tui(quote, server_address, tickers).await;
         }
         Some(Commands::Test) => {
@@ -313,8 +304,10 @@ async fn run_start(
             ScalpingParams {
                 target_profit: dec!(1),
                 quote_amount: dec!(100),
-                buy_cooldown: Duration::from_secs(60 * 15),
-                multiple_orders: true,
+                entry_delay: Duration::from_secs(3600 * 24),
+                reentry_delay: Duration::from_secs(60 * 15),
+                session_count: 2,
+                session_profit_lifetime: Duration::from_secs(3600),
             },
         );
         if strategy.init(None).await.is_err() {
@@ -398,7 +391,7 @@ async fn run_replay(
     let mut marketplace = Binance::new();
     marketplace.init(&tickers).await?;
 
-    let replay = ReplayMarketplace::new(replay_path, marketplace.clone());
+    let replay = ReplayMarketplace::new(replay_path, marketplace.clone(), interval);
 
     let mut simulation = SimulationMarketplace::new(SimulationSource::Book, marketplace.clone());
     simulation
@@ -418,13 +411,15 @@ async fn run_replay(
     for ticker in tickers.iter() {
         let mut strategy = ScalpingStrategy::new(
             state.clone(),
-            marketplace.clone(),
+            replay.clone(),
             ticker.clone(),
             ScalpingParams {
-                target_profit: dec!(1.5),
+                target_profit: dec!(0.3),
                 quote_amount: dec!(100),
-                buy_cooldown: Duration::from_secs(60),
-                multiple_orders: true,
+                entry_delay: Duration::from_secs(3600 * 24),
+                reentry_delay: Duration::from_secs(60),
+                session_count: 1,
+                session_profit_lifetime: Duration::from_secs(3600),
             },
         );
         if strategy.init(start_time).await.is_err() {
